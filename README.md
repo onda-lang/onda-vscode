@@ -1,8 +1,8 @@
-﻿# Onda VSCode Extension
+# Onda VSCode Extension
 
 This extension adds VSCode support for Onda:
 
-- `.onda` language registration
+- `.onda` and `.on` language registration
 - syntax highlighting
 - semantic tokens from `onda lsp`
 - `Onda: Run Patch`
@@ -78,7 +78,7 @@ Or on macOS/Linux:
 
 ## Using the extension
 
-Open an `.onda` file and the extension will activate automatically.
+Open an `.onda` or `.on` file and the extension will activate automatically.
 
 Available commands:
 - `Onda: Run Patch`
