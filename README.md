@@ -18,7 +18,7 @@ This extension adds VSCode support for Onda:
 
 This extension is available on Open VSX:
 
-- https://open-vsx.org/extension/onda/onda-vscode
+- https://open-vsx.org/extension/onda-lang/onda-vscode
 
 ### Option 1: install a `.vsix`
 
