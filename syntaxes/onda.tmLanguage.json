@@ -98,7 +98,7 @@
         },
         {
           "name": "meta.declaration.function.onda",
-          "match": "^(\\s*)(def)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "^(\\s*)(def|event)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "2": {
               "name": "storage.type.block.onda"
