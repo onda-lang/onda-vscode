@@ -101,8 +101,7 @@
       "properties": {
         "onda.server.path": {
           "type": "string",
-          "default": "onda",
-          "description": "Executable used to start the Onda language server."
+          "description": "Path to the Onda executable. Leave unset to use 'onda' from PATH."
         },
         "onda.server.args": {
           "type": "array",
@@ -111,6 +110,25 @@
             "type": "string"
           },
           "description": "Additional arguments passed before the built-in 'lsp' subcommand."
+        },
+        "onda.preview.theme": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "dark",
+            "light"
+          ],
+          "default": "auto",
+          "description": "Theme used by the Onda patch preview panel."
+        },
+        "onda.preview.host": {
+          "type": "string",
+          "enum": [
+            "webview",
+            "egui"
+          ],
+          "default": "webview",
+          "description": "Host used by Onda: Run Patch. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui preview window."
         }
       }
     }

@@ -188,8 +188,14 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
   if (!fsPath) {
     return;
   }
+  const previewHost = ondaPreviewHostSetting();
+  const previewTheme = ondaPreviewThemeSetting();
 
-  ensurePatchPanel();
+  if (previewHost === "webview") {
+    ensurePatchPanel();
+  } else if (patchPanel) {
+    patchPanel.dispose();
+  }
   const preservedParams =
     patchPanelState.path === fsPath ? patchPanelState.params : [];
   const preservedEvents =
@@ -212,14 +218,19 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
   postPatchPanelState();
 
   if (patchProcess && patchPath === fsPath && !options?.restart) {
-    revealPatchPanel();
+    if (previewHost === "webview") {
+      revealPatchPanel();
+    }
     return;
   }
 
   await stopPatch({ silent: true, preservePath: fsPath });
 
   const { command, extraArgs } = ondaExecutableConfig();
-  const args = [...extraArgs, "preview", "play", fsPath, "--forever", "--control-json"];
+  const args =
+    previewHost === "egui"
+      ? [...extraArgs, "preview", fsPath, "--theme", previewTheme]
+      : [...extraArgs, "preview", "play", fsPath, "--forever", "--control-json"];
   if (patchPanelState.currentInputDevice) {
     args.push("--input-device", patchPanelState.currentInputDevice);
   }
@@ -239,10 +250,16 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
 
   patchOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
   patchOutput?.show(true);
-  revealPatchPanel();
+  if (previewHost === "webview") {
+    revealPatchPanel();
+  }
 
   child.stdout.on("data", (chunk: Buffer) => {
-    handlePatchStdout(chunk.toString());
+    if (previewHost === "webview") {
+      handlePatchStdout(chunk.toString());
+    } else {
+      patchOutput?.append(chunk.toString());
+    }
   });
   child.stderr.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
@@ -320,7 +337,7 @@ async function stopPatch(options?: { silent?: boolean; preservePath?: string }):
   const runningPath = patchPath;
   clearPatchRuntimeState({ preservePath: options?.preservePath ?? runningPath });
   stoppingPatchPid = child.pid;
-  child.kill();
+  terminatePatchProcessTree(child);
 
   patchPanelState = {
     ...patchPanelState,
@@ -342,6 +359,29 @@ function clearPatchRuntimeState(options?: { preservePath?: string }): void {
   patchPath = options?.preservePath;
   patchStdoutBuffer = "";
   closePatchControlSocket();
+}
+
+function terminatePatchProcessTree(child: childProcess.ChildProcessWithoutNullStreams): void {
+  if (process.platform === "win32" && child.pid) {
+    const killer = childProcess.spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.once("error", () => {
+      try {
+        child.kill();
+      } catch {
+        // Ignore termination fallback errors.
+      }
+    });
+    return;
+  }
+
+  try {
+    child.kill();
+  } catch {
+    // Ignore termination errors for already-exited children.
+  }
 }
 
 async function restartPatchForSavedDocument(document: vscode.TextDocument): Promise<void> {
@@ -393,8 +433,9 @@ async function currentPatchDocument(): Promise<vscode.TextDocument | undefined> 
 
 function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
   const config = vscode.workspace.getConfiguration("onda");
+  const configuredPath = config.get<string>("server.path");
   return {
-    command: config.get<string>("server.path", "onda"),
+    command: configuredPath && configuredPath.trim().length > 0 ? configuredPath : "onda",
     extraArgs: config.get<string[]>("server.args", []),
   };
 }
@@ -1217,8 +1258,10 @@ function pollScopeData(): void {
 }
 
 function renderSharedPreviewHtml(webview: vscode.Webview): string {
+  const previewTheme = ondaPreviewThemeSetting();
   const csp = [
     "default-src 'none'",
+    "img-src data: https:",
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src ${webview.cspSource} 'unsafe-inline'`,
   ].join("; ");
@@ -1250,7 +1293,7 @@ function renderSharedPreviewHtml(webview: vscode.Webview): string {
   }
 
   // Inject the VS Code host bridge before the page script runs, and add the CSP header.
-  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode" };</script>`;
+  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${previewTheme}" };</script>`;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}" />`;
 
   // Insert CSP meta after <head> and bridge script before the main <script>.
@@ -1258,6 +1301,21 @@ function renderSharedPreviewHtml(webview: vscode.Webview): string {
   html = html.replace("<script>", `${bridgeScript}\n    <script>`);
 
   return html;
+}
+
+function ondaPreviewThemeSetting(): "auto" | "dark" | "light" {
+  const config = vscode.workspace.getConfiguration("onda");
+  const value = config.get<string>("preview.theme", "auto");
+  if (value === "dark" || value === "light") {
+    return value;
+  }
+  return "auto";
+}
+
+function ondaPreviewHostSetting(): "webview" | "egui" {
+  const config = vscode.workspace.getConfiguration("onda");
+  const value = config.get<string>("preview.host", "webview");
+  return value === "egui" ? "egui" : "webview";
 }
 
 async function startClient(context: vscode.ExtensionContext): Promise<void> {
