@@ -109,10 +109,12 @@ let patchStdoutBuffer = "";
 let patchControlRequestId = 0;
 let stoppingPatchPid: number | undefined;
 const pendingPatchRequests = new Map<number, PendingControlRequest>();
+const patchKillTimers = new Map<number, NodeJS.Timeout>();
 let scopePollingTimer: NodeJS.Timeout | undefined;
 let scopePollingInFlight = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 50;
+const PATCH_FORCE_KILL_DELAY_MS = 1500;
 let patchPanelState: PatchPanelState = {
   running: false,
   connected: false,
@@ -241,6 +243,7 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
   const child = childProcess.spawn(command, args, {
     cwd,
     stdio: "pipe",
+    detached: process.platform !== "win32",
   });
 
   patchProcess = child;
@@ -287,6 +290,7 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
     const finishedPath = fsPath;
+    clearPatchKillTimer(child.pid);
     const expectedStop = child.pid !== undefined && stoppingPatchPid === child.pid;
     const exitError = expectedStop ? undefined : formatPatchExitError(patchStderrBuffer, code, signal);
     if (expectedStop) {
@@ -377,24 +381,75 @@ function terminatePatchProcessTree(child: childProcess.ChildProcessWithoutNullSt
     return;
   }
 
+  const pid = child.pid;
+  if (!pid) {
+    try {
+      child.kill();
+    } catch {
+      // Ignore termination errors for already-exited children.
+    }
+    return;
+  }
+
+  terminateUnixPatchProcess(pid);
+}
+
+function terminateUnixPatchProcess(pid: number): void {
+  const groupPid = -pid;
   try {
-    child.kill();
+    process.kill(groupPid, "SIGTERM");
   } catch {
-    // Ignore termination errors for already-exited children.
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+  }
+
+  clearPatchKillTimer(pid);
+  const timer = setTimeout(() => {
+    patchKillTimers.delete(pid);
+    try {
+      process.kill(groupPid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Ignore termination errors for already-exited children.
+      }
+    }
+  }, PATCH_FORCE_KILL_DELAY_MS);
+  timer.unref();
+  patchKillTimers.set(pid, timer);
+}
+
+function clearPatchKillTimer(pid: number | undefined): void {
+  if (pid === undefined) {
+    return;
+  }
+  const timer = patchKillTimers.get(pid);
+  if (timer) {
+    clearTimeout(timer);
+    patchKillTimers.delete(pid);
   }
 }
 
 async function restartPatchForSavedDocument(document: vscode.TextDocument): Promise<void> {
-  if (!patchProcess || !patchPath) {
-    return;
-  }
   if (document.languageId !== "onda" || document.uri.scheme !== "file") {
     return;
   }
-  if (path.resolve(document.uri.fsPath) !== path.resolve(patchPath)) {
+  const activePath = patchPath ?? patchPanelState.path;
+  if (!activePath) {
     return;
   }
-  await runPatch(document.uri.fsPath, { restart: true });
+  if (path.resolve(document.uri.fsPath) !== path.resolve(activePath)) {
+    return;
+  }
+  if (patchProcess && patchPath) {
+    await runPatch(document.uri.fsPath, { restart: true });
+    return;
+  }
+  await refreshStoppedPatchMetadata(document.uri.fsPath);
 }
 
 async function resolvePatchPath(preferredPath?: string): Promise<string | undefined> {
@@ -457,6 +512,199 @@ function trimPatchErrorText(text: string, maxChars = 4000): string | undefined {
 
 function formatPatchExitError(stderrText: string, code: number | null, signal: NodeJS.Signals | null): string {
   return trimPatchErrorText(stderrText) ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
+}
+
+async function refreshStoppedPatchMetadata(fsPath: string): Promise<void> {
+  try {
+    const result = await loadStoppedPatchMetadata(fsPath);
+    const params = normalizeStoppedPatchParams(result.params);
+    patchPanelState = {
+      ...patchPanelState,
+      path: fsPath,
+      status: "Stopped",
+      error: undefined,
+      outputChannels:
+        typeof result.output_channels === "number"
+          ? result.output_channels
+          : patchPanelState.outputChannels,
+      params: params
+        ? mergePatchParams(params, patchPanelState.params)
+        : patchPanelState.params,
+    };
+    postPatchPanelState();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    patchPanelState = {
+      ...patchPanelState,
+      path: fsPath,
+      status: "Stopped",
+      error: message,
+    };
+    postPatchPanelState();
+  }
+}
+
+async function loadStoppedPatchMetadata(
+  fsPath: string,
+): Promise<{ params?: PatchParamPayload[]; output_channels?: number }> {
+  const { command, extraArgs } = ondaExecutableConfig();
+  const cwd =
+    vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
+
+  return await new Promise((resolve, reject) => {
+    const child = childProcess.spawn(command, [...extraArgs, "daemon", "stdio"], {
+      cwd,
+      stdio: "pipe",
+      windowsHide: true,
+    });
+
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let settled = false;
+    let nextId = 1;
+    const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+
+    const finish = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      pending.clear();
+      try {
+        child.stdin.end();
+      } catch {
+        // Ignore stdin close errors during shutdown.
+      }
+      try {
+        child.kill();
+      } catch {
+        // Ignore termination errors for already-exited children.
+      }
+      fn();
+    };
+
+    const fail = (message: string) => {
+      finish(() => reject(new Error(message)));
+    };
+
+    const sendRequest = (commandName: string, payload?: Record<string, unknown>): Promise<any> => {
+      return new Promise((requestResolve, requestReject) => {
+        const id = nextId++;
+        pending.set(id, { resolve: requestResolve, reject: requestReject });
+        const request = JSON.stringify({
+          id,
+          command: commandName,
+          ...payload,
+        });
+        child.stdin.write(`${request}\n`, (error?: Error | null) => {
+          if (!error) {
+            return;
+          }
+          pending.delete(id);
+          requestReject(error);
+        });
+      });
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      for (;;) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline < 0) {
+          break;
+        }
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+        let payload: { id?: number; ok?: boolean; result?: unknown; error?: string };
+        try {
+          payload = JSON.parse(line);
+        } catch (error) {
+          fail(`invalid daemon response: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        if (typeof payload.id !== "number") {
+          continue;
+        }
+        const request = pending.get(payload.id);
+        if (!request) {
+          continue;
+        }
+        pending.delete(payload.id);
+        if (payload.ok) {
+          request.resolve(payload.result);
+        } else {
+          request.reject(new Error(payload.error ?? "daemon request failed"));
+        }
+      }
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderrBuffer += chunk;
+    });
+
+    child.once("error", (error: Error) => {
+      fail(`failed to start daemon metadata refresh: ${error.message}`);
+    });
+
+    child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) {
+        return;
+      }
+      const stderrText = trimPatchErrorText(stderrBuffer);
+      const reason = stderrText ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
+      fail(`daemon metadata refresh exited unexpectedly: ${reason}`);
+    });
+
+    void sendRequest("preview_start", { path: fsPath })
+      .then((result) => {
+        finish(() => resolve(result ?? {}));
+      })
+      .catch((error: Error) => {
+        fail(error.message);
+      });
+  });
+}
+
+function normalizeStoppedPatchParams(raw: unknown): PatchParamPayload[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  return raw.map((param) => {
+    const source = (param ?? {}) as Record<string, unknown>;
+    return {
+      index: typeof source.index === "number" ? source.index : 0,
+      name: typeof source.name === "string" ? source.name : "",
+      type:
+        typeof source.type === "string"
+          ? source.type
+          : typeof source.type_repr === "string"
+            ? source.type_repr
+            : "f32",
+      value:
+        typeof source.value === "boolean" || typeof source.value === "number" || source.value === null
+          ? source.value as PatchScalarValue
+          : null,
+      default: typeof source.default === "number" ? source.default : null,
+      rangeMin:
+        typeof source.rangeMin === "number"
+          ? source.rangeMin
+          : typeof source.range_min === "number"
+            ? source.range_min
+            : null,
+      rangeMax:
+        typeof source.rangeMax === "number"
+          ? source.rangeMax
+          : typeof source.range_max === "number"
+            ? source.range_max
+            : null,
+      scalar: source.scalar !== false,
+    };
+  });
 }
 
 function handlePatchStdout(chunk: string): void {

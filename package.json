@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "url": "https://github.com/vitreo12/onda.git"
   },
   "engines": {
-    "vscode": "^1.115.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Programming Languages"
@@ -141,7 +141,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
-    "@types/vscode": "^1.115.0",
+    "@types/vscode": "^1.90.0",
     "typescript": "^5.5.4"
   },
   "dependencies": {
