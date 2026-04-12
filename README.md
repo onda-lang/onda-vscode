@@ -5,8 +5,8 @@ This extension adds VSCode support for Onda:
 - `.onda` and `.on` language registration
 - syntax highlighting
 - semantic tokens from `onda lsp`
-- `Onda: Run Patch`
-- `Onda: Stop Patch`
+- `Onda: Run File`
+- `Onda: Stop File`
 - `Onda: Restart Language Server`
 
 ## Requirements
@@ -28,7 +28,7 @@ If you already have a packaged `.vsix`, install it with one of these:
 - CLI:
 
 ```bash
-code --install-extension onda-vscode-0.1.6.vsix
+code --install-extension onda-vscode-0.1.7.vsix
 ```
 
 ### Option 2: build a `.vsix` locally from this repo
@@ -44,7 +44,7 @@ npx @vscode/vsce package
 That produces a `.vsix` file in the repo root, which you can then install with:
 
 ```bash
-code --install-extension ./onda-vscode-0.1.6.vsix
+code --install-extension ./onda-vscode-0.1.7.vsix
 ```
 
 If you prefer the UI, use `Extensions: Install from VSIX...` and select the generated file.
@@ -85,11 +85,11 @@ Or on macOS/Linux:
 Open an `.onda` or `.on` file and the extension will activate automatically.
 
 Available commands:
-- `Onda: Run Patch`
-- `Onda: Stop Patch`
+- `Onda: Run File`
+- `Onda: Stop File`
 - `Onda: Restart Language Server`
 
-`Onda: Run Patch` starts the preview transport and opens the patch UI.
+`Onda: Run File` starts the run transport and opens the run UI.
 
 ## Development
 
@@ -101,4 +101,3 @@ npm run compile
 ```
 
 Then open this repo in VSCode and launch an Extension Development Host.
-

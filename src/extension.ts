@@ -10,22 +10,22 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 
-type PatchScalarValue = boolean | number | null;
+type RunScalarValue = boolean | number | null;
 
-interface PatchParamPayload {
+interface RunParamPayload {
   index: number;
   name: string;
   type: string;
-  value: PatchScalarValue;
+  value: RunScalarValue;
   default: number | null;
   rangeMin: number | null;
   rangeMax: number | null;
   scalar: boolean;
 }
 
-interface PatchParamState extends PatchParamPayload {}
+interface RunParamState extends RunParamPayload {}
 
-interface PatchBufferPayload {
+interface RunBufferPayload {
   index: number;
   name: string;
   type: string;
@@ -34,39 +34,39 @@ interface PatchBufferPayload {
   loadedPath: string | null;
 }
 
-interface PatchBufferState extends PatchBufferPayload {}
+interface RunBufferState extends RunBufferPayload {}
 
-interface PatchEventArgPayload {
+interface RunEventArgPayload {
   index: number;
   name: string;
   type: string;
-  default?: PatchScalarValue;
-  value?: PatchScalarValue;
+  default?: RunScalarValue;
+  value?: RunScalarValue;
 }
 
-interface PatchEventArgState extends PatchEventArgPayload {
-  value: PatchScalarValue;
+interface RunEventArgState extends RunEventArgPayload {
+  value: RunScalarValue;
 }
 
-interface PatchEventPayload {
+interface RunEventPayload {
   index: number;
   name: string;
-  args: PatchEventArgPayload[];
+  args: RunEventArgPayload[];
 }
 
-interface PatchEventState {
+interface RunEventState {
   index: number;
   name: string;
-  args: PatchEventArgState[];
+  args: RunEventArgState[];
 }
 
-interface PatchReadyEvent {
+interface RunReadyEvent {
   event: "ready";
   path: string;
   port: number;
-  params: PatchParamPayload[];
-  buffers: PatchBufferPayload[];
-  events: PatchEventPayload[];
+  params: RunParamPayload[];
+  buffers: RunBufferPayload[];
+  events: RunEventPayload[];
   outputChannels: number;
   inputDevices: string[];
   outputDevices: string[];
@@ -74,16 +74,16 @@ interface PatchReadyEvent {
   currentOutputDevice: string | null;
 }
 
-interface PatchPanelState {
+interface RunPanelState {
   running: boolean;
   connected: boolean;
   path?: string;
   status: string;
   error?: string;
   outputChannels: number;
-  buffers: PatchBufferState[];
-  events: PatchEventState[];
-  params: PatchParamState[];
+  buffers: RunBufferState[];
+  events: RunEventState[];
+  params: RunParamState[];
   inputDevices: string[];
   outputDevices: string[];
   currentInputDevice: string | null;
@@ -97,25 +97,25 @@ interface PendingControlRequest {
 
 let client: LanguageClient | undefined;
 let extensionContext: vscode.ExtensionContext | undefined;
-let patchProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
-let patchPath: string | undefined;
-let patchOutput: vscode.OutputChannel | undefined;
+let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
+let runPath: string | undefined;
+let runOutput: vscode.OutputChannel | undefined;
 let serverOutput: vscode.OutputChannel | undefined;
-let patchPanel: vscode.WebviewPanel | undefined;
-let patchPanelReady = false;
-let patchControlSocket: net.Socket | undefined;
-let patchControlBuffer = "";
-let patchStdoutBuffer = "";
-let patchControlRequestId = 0;
-let stoppingPatchPid: number | undefined;
-const pendingPatchRequests = new Map<number, PendingControlRequest>();
-const patchKillTimers = new Map<number, NodeJS.Timeout>();
+let runPanel: vscode.WebviewPanel | undefined;
+let runPanelReady = false;
+let runControlSocket: net.Socket | undefined;
+let runControlBuffer = "";
+let runStdoutBuffer = "";
+let runControlRequestId = 0;
+let stoppingRunPid: number | undefined;
+const pendingRunRequests = new Map<number, PendingControlRequest>();
+const runKillTimers = new Map<number, NodeJS.Timeout>();
 let scopePollingTimer: NodeJS.Timeout | undefined;
 let scopePollingInFlight = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 50;
-const PATCH_FORCE_KILL_DELAY_MS = 1500;
-let patchPanelState: PatchPanelState = {
+const RUN_FORCE_KILL_DELAY_MS = 1500;
+let runPanelState: RunPanelState = {
   running: false,
   connected: false,
   status: "Stopped",
@@ -131,9 +131,9 @@ let patchPanelState: PatchPanelState = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
-  patchOutput = vscode.window.createOutputChannel("Onda Patch");
+  runOutput = vscode.window.createOutputChannel("Onda Run");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
-  context.subscriptions.push(patchOutput, serverOutput);
+  context.subscriptions.push(runOutput, serverOutput);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.restartLanguageServer", async () => {
@@ -141,18 +141,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
   context.subscriptions.push(
-    vscode.commands.registerCommand("onda.runPatch", async () => {
-      await runPatch();
+    vscode.commands.registerCommand("onda.runFile", async () => {
+      await runFile();
     }),
   );
   context.subscriptions.push(
-    vscode.commands.registerCommand("onda.stopPatch", async () => {
-      await stopPatch();
+    vscode.commands.registerCommand("onda.stopFile", async () => {
+      await stopFile();
     }),
   );
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (document) => {
-      await restartPatchForSavedDocument(document);
+      await restartRunForSavedDocument(document);
     }),
   );
 
@@ -160,7 +160,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
-  await stopPatch({ silent: true });
+  await stopFile({ silent: true });
 
   if (!client) {
     return;
@@ -185,59 +185,59 @@ async function restartClient(): Promise<void> {
   await startClient(extensionContext);
 }
 
-async function runPatch(preferredPath?: string, options?: { restart?: boolean }): Promise<void> {
-  const fsPath = await resolvePatchPath(preferredPath);
+async function runFile(preferredPath?: string, options?: { restart?: boolean }): Promise<void> {
+  const fsPath = await resolveRunPath(preferredPath);
   if (!fsPath) {
     return;
   }
-  const previewHost = ondaPreviewHostSetting();
-  const previewTheme = ondaPreviewThemeSetting();
+  const runHost = ondaRunHostSetting();
+  const runTheme = ondaRunThemeSetting();
 
-  if (previewHost === "webview") {
-    ensurePatchPanel();
-  } else if (patchPanel) {
-    patchPanel.dispose();
+  if (runHost === "webview") {
+    ensureRunPanel();
+  } else if (runPanel) {
+    runPanel.dispose();
   }
   const preservedParams =
-    patchPanelState.path === fsPath ? patchPanelState.params : [];
+    runPanelState.path === fsPath ? runPanelState.params : [];
   const preservedEvents =
-    patchPanelState.path === fsPath ? patchPanelState.events : [];
-  patchPanelState = {
+    runPanelState.path === fsPath ? runPanelState.events : [];
+  runPanelState = {
     running: false,
     connected: false,
     path: fsPath,
     status: `Starting ${path.basename(fsPath)}...`,
     error: undefined,
-    outputChannels: patchPanelState.path === fsPath ? patchPanelState.outputChannels : 0,
-    buffers: patchPanelState.path === fsPath ? patchPanelState.buffers : [],
+    outputChannels: runPanelState.path === fsPath ? runPanelState.outputChannels : 0,
+    buffers: runPanelState.path === fsPath ? runPanelState.buffers : [],
     events: preservedEvents,
     params: preservedParams,
-    inputDevices: patchPanelState.inputDevices,
-    outputDevices: patchPanelState.outputDevices,
-    currentInputDevice: patchPanelState.currentInputDevice,
-    currentOutputDevice: patchPanelState.currentOutputDevice,
+    inputDevices: runPanelState.inputDevices,
+    outputDevices: runPanelState.outputDevices,
+    currentInputDevice: runPanelState.currentInputDevice,
+    currentOutputDevice: runPanelState.currentOutputDevice,
   };
-  postPatchPanelState();
+  postRunPanelState();
 
-  if (patchProcess && patchPath === fsPath && !options?.restart) {
-    if (previewHost === "webview") {
-      revealPatchPanel();
+  if (runProcess && runPath === fsPath && !options?.restart) {
+    if (runHost === "webview") {
+      revealRunPanel();
     }
     return;
   }
 
-  await stopPatch({ silent: true, preservePath: fsPath });
+  await stopFile({ silent: true, preservePath: fsPath });
 
   const { command, extraArgs } = ondaExecutableConfig();
   const args =
-    previewHost === "egui"
-      ? [...extraArgs, "preview", fsPath, "--theme", previewTheme]
-      : [...extraArgs, "preview", "play", fsPath, "--forever", "--control-json"];
-  if (patchPanelState.currentInputDevice) {
-    args.push("--input-device", patchPanelState.currentInputDevice);
+    runHost === "egui"
+      ? [...extraArgs, "run", fsPath, "--theme", runTheme]
+      : [...extraArgs, "run", "play", fsPath, "--forever", "--control-json"];
+  if (runPanelState.currentInputDevice) {
+    args.push("--input-device", runPanelState.currentInputDevice);
   }
-  if (patchPanelState.currentOutputDevice) {
-    args.push("--output-device", patchPanelState.currentOutputDevice);
+  if (runPanelState.currentOutputDevice) {
+    args.push("--output-device", runPanelState.currentOutputDevice);
   }
   const cwd = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
   const child = childProcess.spawn(command, args, {
@@ -246,68 +246,68 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
     detached: process.platform !== "win32",
   });
 
-  patchProcess = child;
-  patchPath = fsPath;
-  patchStdoutBuffer = "";
-  let patchStderrBuffer = "";
+  runProcess = child;
+  runPath = fsPath;
+  runStdoutBuffer = "";
+  let runStderrBuffer = "";
 
-  patchOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
-  patchOutput?.show(true);
-  if (previewHost === "webview") {
-    revealPatchPanel();
+  runOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
+  runOutput?.show(true);
+  if (runHost === "webview") {
+    revealRunPanel();
   }
 
   child.stdout.on("data", (chunk: Buffer) => {
-    if (previewHost === "webview") {
-      handlePatchStdout(chunk.toString());
+    if (runHost === "webview") {
+      handleRunStdout(chunk.toString());
     } else {
-      patchOutput?.append(chunk.toString());
+      runOutput?.append(chunk.toString());
     }
   });
   child.stderr.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
-    patchStderrBuffer += text;
-    patchOutput?.append(text);
+    runStderrBuffer += text;
+    runOutput?.append(text);
   });
   child.once("error", (error: Error) => {
     const failedPath = fsPath;
-    if (patchProcess === child) {
-      clearPatchRuntimeState({ preservePath: failedPath });
+    if (runProcess === child) {
+      clearRunRuntimeState({ preservePath: failedPath });
     }
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       running: false,
       connected: false,
       path: failedPath,
       status: "Failed to start",
       error: error.message,
     };
-    postPatchPanelState();
-    patchOutput?.show(true);
+    postRunPanelState();
+    runOutput?.show(true);
     void vscode.window.showErrorMessage(
-      `Failed to start Onda patch${failedPath ? ` (${path.basename(failedPath)})` : ""}: ${error.message}`,
+      `Failed to start Onda run${failedPath ? ` (${path.basename(failedPath)})` : ""}: ${error.message}`,
     );
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
     const finishedPath = fsPath;
-    clearPatchKillTimer(child.pid);
-    const expectedStop = child.pid !== undefined && stoppingPatchPid === child.pid;
-    const exitError = expectedStop ? undefined : formatPatchExitError(patchStderrBuffer, code, signal);
+    clearRunKillTimer(child.pid);
+    const expectedStop = child.pid !== undefined && stoppingRunPid === child.pid;
+    const exitError = expectedStop ? undefined : formatRunExitError(runStderrBuffer, code, signal);
     if (expectedStop) {
-      stoppingPatchPid = undefined;
+      stoppingRunPid = undefined;
     }
-    if (patchProcess === child) {
-      clearPatchRuntimeState({ preservePath: finishedPath });
+    if (runProcess === child) {
+      clearRunRuntimeState({ preservePath: finishedPath });
     }
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       running: false,
       connected: false,
       path: finishedPath,
-      status: expectedStop ? "Stopped" : "Patch exited",
+      status: expectedStop ? "Stopped" : "Run exited",
       error: exitError,
     };
-    postPatchPanelState();
+    postRunPanelState();
     if (expectedStop) {
       return;
     }
@@ -315,57 +315,57 @@ async function runPatch(preferredPath?: string, options?: { restart?: boolean })
       return;
     }
     const reason = exitError ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
-    patchOutput?.show(true);
+    runOutput?.show(true);
     void vscode.window.showWarningMessage(
-      `Onda patch stopped${finishedPath ? ` (${path.basename(finishedPath)})` : ""}: ${reason}`,
+      `Onda run stopped${finishedPath ? ` (${path.basename(finishedPath)})` : ""}: ${reason}`,
     );
   });
 }
 
-async function stopPatch(options?: { silent?: boolean; preservePath?: string }): Promise<void> {
-  if (!patchProcess) {
+async function stopFile(options?: { silent?: boolean; preservePath?: string }): Promise<void> {
+  if (!runProcess) {
     if (!options?.silent) {
-      void vscode.window.showInformationMessage("No Onda patch is currently running.");
+      void vscode.window.showInformationMessage("No Onda run is currently running.");
     }
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       running: false,
       connected: false,
       status: "Stopped",
     };
-    postPatchPanelState();
+    postRunPanelState();
     return;
   }
 
-  const child = patchProcess;
-  const runningPath = patchPath;
-  clearPatchRuntimeState({ preservePath: options?.preservePath ?? runningPath });
-  stoppingPatchPid = child.pid;
-  terminatePatchProcessTree(child);
+  const child = runProcess;
+  const runningPath = runPath;
+  clearRunRuntimeState({ preservePath: options?.preservePath ?? runningPath });
+  stoppingRunPid = child.pid;
+  terminateRunProcessTree(child);
 
-  patchPanelState = {
-    ...patchPanelState,
+  runPanelState = {
+    ...runPanelState,
     running: false,
     connected: false,
     path: options?.preservePath ?? runningPath,
     status: "Stopped",
     error: undefined,
   };
-  postPatchPanelState();
+  postRunPanelState();
 
   if (!options?.silent && runningPath) {
-    void vscode.window.showInformationMessage(`Stopped Onda patch: ${path.basename(runningPath)}`);
+    void vscode.window.showInformationMessage(`Stopped Onda run: ${path.basename(runningPath)}`);
   }
 }
 
-function clearPatchRuntimeState(options?: { preservePath?: string }): void {
-  patchProcess = undefined;
-  patchPath = options?.preservePath;
-  patchStdoutBuffer = "";
-  closePatchControlSocket();
+function clearRunRuntimeState(options?: { preservePath?: string }): void {
+  runProcess = undefined;
+  runPath = options?.preservePath;
+  runStdoutBuffer = "";
+  closeRunControlSocket();
 }
 
-function terminatePatchProcessTree(child: childProcess.ChildProcessWithoutNullStreams): void {
+function terminateRunProcessTree(child: childProcess.ChildProcessWithoutNullStreams): void {
   if (process.platform === "win32" && child.pid) {
     const killer = childProcess.spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
@@ -391,10 +391,10 @@ function terminatePatchProcessTree(child: childProcess.ChildProcessWithoutNullSt
     return;
   }
 
-  terminateUnixPatchProcess(pid);
+  terminateUnixRunProcess(pid);
 }
 
-function terminateUnixPatchProcess(pid: number): void {
+function terminateUnixRunProcess(pid: number): void {
   const groupPid = -pid;
   try {
     process.kill(groupPid, "SIGTERM");
@@ -406,9 +406,9 @@ function terminateUnixPatchProcess(pid: number): void {
     }
   }
 
-  clearPatchKillTimer(pid);
+  clearRunKillTimer(pid);
   const timer = setTimeout(() => {
-    patchKillTimers.delete(pid);
+    runKillTimers.delete(pid);
     try {
       process.kill(groupPid, "SIGKILL");
     } catch {
@@ -418,45 +418,45 @@ function terminateUnixPatchProcess(pid: number): void {
         // Ignore termination errors for already-exited children.
       }
     }
-  }, PATCH_FORCE_KILL_DELAY_MS);
+  }, RUN_FORCE_KILL_DELAY_MS);
   timer.unref();
-  patchKillTimers.set(pid, timer);
+  runKillTimers.set(pid, timer);
 }
 
-function clearPatchKillTimer(pid: number | undefined): void {
+function clearRunKillTimer(pid: number | undefined): void {
   if (pid === undefined) {
     return;
   }
-  const timer = patchKillTimers.get(pid);
+  const timer = runKillTimers.get(pid);
   if (timer) {
     clearTimeout(timer);
-    patchKillTimers.delete(pid);
+    runKillTimers.delete(pid);
   }
 }
 
-async function restartPatchForSavedDocument(document: vscode.TextDocument): Promise<void> {
+async function restartRunForSavedDocument(document: vscode.TextDocument): Promise<void> {
   if (document.languageId !== "onda" || document.uri.scheme !== "file") {
     return;
   }
-  const activePath = patchPath ?? patchPanelState.path;
+  const activePath = runPath ?? runPanelState.path;
   if (!activePath) {
     return;
   }
   if (path.resolve(document.uri.fsPath) !== path.resolve(activePath)) {
     return;
   }
-  if (patchProcess && patchPath) {
-    await runPatch(document.uri.fsPath, { restart: true });
+  if (runProcess && runPath) {
+    await runFile(document.uri.fsPath, { restart: true });
     return;
   }
-  await refreshStoppedPatchMetadata(document.uri.fsPath);
+  await refreshStoppedRunMetadata(document.uri.fsPath);
 }
 
-async function resolvePatchPath(preferredPath?: string): Promise<string | undefined> {
+async function resolveRunPath(preferredPath?: string): Promise<string | undefined> {
   if (preferredPath) {
     return preferredPath;
   }
-  const document = await currentPatchDocument();
+  const document = await currentRunDocument();
   if (!document) {
     return undefined;
   }
@@ -464,7 +464,7 @@ async function resolvePatchPath(preferredPath?: string): Promise<string | undefi
   if (document.isDirty) {
     const saved = await document.save();
     if (!saved) {
-      void vscode.window.showErrorMessage("Onda patch must be saved before playback starts.");
+      void vscode.window.showErrorMessage("Onda run must be saved before playback starts.");
       return undefined;
     }
   }
@@ -472,15 +472,15 @@ async function resolvePatchPath(preferredPath?: string): Promise<string | undefi
   return document.uri.fsPath;
 }
 
-async function currentPatchDocument(): Promise<vscode.TextDocument | undefined> {
+async function currentRunDocument(): Promise<vscode.TextDocument | undefined> {
   const editor = vscode.window.activeTextEditor;
   const document = editor?.document;
   if (!document || document.languageId !== "onda") {
-    void vscode.window.showErrorMessage("Open an Onda file to run a patch.");
+    void vscode.window.showErrorMessage("Open an Onda file to run a run.");
     return undefined;
   }
   if (document.uri.scheme !== "file") {
-    void vscode.window.showErrorMessage("Onda patch playback currently requires a saved file on disk.");
+    void vscode.window.showErrorMessage("Onda run playback currently requires a saved file on disk.");
     return undefined;
   }
   return document;
@@ -499,7 +499,7 @@ function shellQuote(value: string): string {
   return /\s/.test(value) ? JSON.stringify(value) : value;
 }
 
-function trimPatchErrorText(text: string, maxChars = 4000): string | undefined {
+function trimRunErrorText(text: string, maxChars = 4000): string | undefined {
   const trimmed = text.trim();
   if (!trimmed) {
     return undefined;
@@ -510,43 +510,43 @@ function trimPatchErrorText(text: string, maxChars = 4000): string | undefined {
   return `â€¦${trimmed.slice(trimmed.length - maxChars)}`;
 }
 
-function formatPatchExitError(stderrText: string, code: number | null, signal: NodeJS.Signals | null): string {
-  return trimPatchErrorText(stderrText) ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
+function formatRunExitError(stderrText: string, code: number | null, signal: NodeJS.Signals | null): string {
+  return trimRunErrorText(stderrText) ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
 }
 
-async function refreshStoppedPatchMetadata(fsPath: string): Promise<void> {
+async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
   try {
-    const result = await loadStoppedPatchMetadata(fsPath);
-    const params = normalizeStoppedPatchParams(result.params);
-    patchPanelState = {
-      ...patchPanelState,
+    const result = await loadStoppedRunMetadata(fsPath);
+    const params = normalizeStoppedRunParams(result.params);
+    runPanelState = {
+      ...runPanelState,
       path: fsPath,
       status: "Stopped",
       error: undefined,
       outputChannels:
         typeof result.output_channels === "number"
           ? result.output_channels
-          : patchPanelState.outputChannels,
+          : runPanelState.outputChannels,
       params: params
-        ? mergePatchParams(params, patchPanelState.params)
-        : patchPanelState.params,
+        ? mergeRunParams(params, runPanelState.params)
+        : runPanelState.params,
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       path: fsPath,
       status: "Stopped",
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-async function loadStoppedPatchMetadata(
+async function loadStoppedRunMetadata(
   fsPath: string,
-): Promise<{ params?: PatchParamPayload[]; output_channels?: number }> {
+): Promise<{ params?: RunParamPayload[]; output_channels?: number }> {
   const { command, extraArgs } = ondaExecutableConfig();
   const cwd =
     vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
@@ -655,12 +655,12 @@ async function loadStoppedPatchMetadata(
       if (settled) {
         return;
       }
-      const stderrText = trimPatchErrorText(stderrBuffer);
+      const stderrText = trimRunErrorText(stderrBuffer);
       const reason = stderrText ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`);
       fail(`daemon metadata refresh exited unexpectedly: ${reason}`);
     });
 
-    void sendRequest("preview_start", { path: fsPath })
+    void sendRequest("run_start", { path: fsPath })
       .then((result) => {
         finish(() => resolve(result ?? {}));
       })
@@ -670,7 +670,7 @@ async function loadStoppedPatchMetadata(
   });
 }
 
-function normalizeStoppedPatchParams(raw: unknown): PatchParamPayload[] | undefined {
+function normalizeStoppedRunParams(raw: unknown): RunParamPayload[] | undefined {
   if (!Array.isArray(raw)) {
     return undefined;
   }
@@ -687,7 +687,7 @@ function normalizeStoppedPatchParams(raw: unknown): PatchParamPayload[] | undefi
             : "f32",
       value:
         typeof source.value === "boolean" || typeof source.value === "number" || source.value === null
-          ? source.value as PatchScalarValue
+          ? source.value as RunScalarValue
           : null,
       default: typeof source.default === "number" ? source.default : null,
       rangeMin:
@@ -707,58 +707,58 @@ function normalizeStoppedPatchParams(raw: unknown): PatchParamPayload[] | undefi
   });
 }
 
-function handlePatchStdout(chunk: string): void {
-  patchStdoutBuffer += chunk;
+function handleRunStdout(chunk: string): void {
+  runStdoutBuffer += chunk;
   for (;;) {
-    const newline = patchStdoutBuffer.indexOf("\n");
+    const newline = runStdoutBuffer.indexOf("\n");
     if (newline < 0) {
       break;
     }
-    const line = patchStdoutBuffer.slice(0, newline).trim();
-    patchStdoutBuffer = patchStdoutBuffer.slice(newline + 1);
+    const line = runStdoutBuffer.slice(0, newline).trim();
+    runStdoutBuffer = runStdoutBuffer.slice(newline + 1);
     if (line.length === 0) {
       continue;
     }
-    handlePatchStdoutLine(line);
+    handleRunStdoutLine(line);
   }
 }
 
-function handlePatchStdoutLine(line: string): void {
+function handleRunStdoutLine(line: string): void {
   try {
-    const payload = JSON.parse(line) as PatchReadyEvent;
+    const payload = JSON.parse(line) as RunReadyEvent;
     if (payload.event === "ready") {
-      patchPanelState = {
+      runPanelState = {
         running: true,
         connected: false,
-        path: patchPath,
+        path: runPath,
         status: "Running",
         error: undefined,
         outputChannels: payload.outputChannels ?? 0,
-        buffers: mergePatchBuffers(payload.buffers ?? [], patchPanelState.buffers),
-        events: mergePatchEvents(payload.events ?? [], patchPanelState.events),
-        params: mergePatchParams(payload.params, patchPanelState.params),
+        buffers: mergeRunBuffers(payload.buffers ?? [], runPanelState.buffers),
+        events: mergeRunEvents(payload.events ?? [], runPanelState.events),
+        params: mergeRunParams(payload.params, runPanelState.params),
         inputDevices: payload.inputDevices ?? [],
         outputDevices: payload.outputDevices ?? [],
         currentInputDevice: payload.currentInputDevice ?? null,
         currentOutputDevice: payload.currentOutputDevice ?? null,
       };
-      postPatchPanelState();
-      connectPatchControl(payload.port);
+      postRunPanelState();
+      connectRunControl(payload.port);
       return;
     }
   } catch {
     // Fall through to raw output logging.
   }
 
-  patchOutput?.appendLine(line);
+  runOutput?.appendLine(line);
 }
 
 // Merge new param metadata with previously-preserved user values (across restarts).
-// Default value hydration is handled by the webview (preview.html).
-function mergePatchParams(
-  params: PatchParamPayload[],
-  existing: PatchParamState[],
-): PatchParamState[] {
+// Default value hydration is handled by the webview (run.html).
+function mergeRunParams(
+  params: RunParamPayload[],
+  existing: RunParamState[],
+): RunParamState[] {
   return params
     .filter((param) => param.scalar)
     .map((param) => {
@@ -766,16 +766,16 @@ function mergePatchParams(
       return {
         ...param,
         value:
-          previous && patchParamsMatchForPreservation(param, previous)
+          previous && runParamsMatchForPreservation(param, previous)
             ? previous.value
             : initialParamValue(param),
       };
     });
 }
 
-function patchParamsMatchForPreservation(
-  next: PatchParamPayload,
-  previous: PatchParamState,
+function runParamsMatchForPreservation(
+  next: RunParamPayload,
+  previous: RunParamState,
 ): boolean {
   return (
     next.name === previous.name &&
@@ -787,10 +787,10 @@ function patchParamsMatchForPreservation(
   );
 }
 
-function mergePatchBuffers(
-  buffers: PatchBufferPayload[],
-  existing: PatchBufferState[],
-): PatchBufferState[] {
+function mergeRunBuffers(
+  buffers: RunBufferPayload[],
+  existing: RunBufferState[],
+): RunBufferState[] {
   return buffers.map((buffer) => {
     const previous = existing.find((item) => item.name === buffer.name);
     return {
@@ -800,10 +800,10 @@ function mergePatchBuffers(
   });
 }
 
-function mergePatchEvents(
-  events: PatchEventPayload[],
-  existing: PatchEventState[],
-): PatchEventState[] {
+function mergeRunEvents(
+  events: RunEventPayload[],
+  existing: RunEventState[],
+): RunEventState[] {
   return events.map((event) => {
     const previous = existing.find((item) => item.name === event.name);
     return {
@@ -821,193 +821,193 @@ function mergePatchEvents(
   });
 }
 
-function connectPatchControl(port: number): void {
-  closePatchControlSocket();
+function connectRunControl(port: number): void {
+  closeRunControlSocket();
 
   const socket = net.createConnection({ host: "127.0.0.1", port });
-  patchControlSocket = socket;
-  patchControlBuffer = "";
+  runControlSocket = socket;
+  runControlBuffer = "";
 
   socket.setEncoding("utf8");
   socket.on("connect", () => {
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       connected: true,
       status: "Running",
       error: undefined,
     };
-    postPatchPanelState();
-    void Promise.all([refreshPatchParams(), refreshPatchBuffers(), refreshPatchEvents()]).then(() => {
-      reapplyCachedPatchParams();
-      reapplyCachedPatchBuffers();
+    postRunPanelState();
+    void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]).then(() => {
+      reapplyCachedRunParams();
+      reapplyCachedRunBuffers();
     });
     startScopePolling();
   });
   socket.on("data", (chunk: string) => {
-    patchControlBuffer += chunk;
+    runControlBuffer += chunk;
     for (;;) {
-      const newline = patchControlBuffer.indexOf("\n");
+      const newline = runControlBuffer.indexOf("\n");
       if (newline < 0) {
         break;
       }
-      const line = patchControlBuffer.slice(0, newline).trim();
-      patchControlBuffer = patchControlBuffer.slice(newline + 1);
+      const line = runControlBuffer.slice(0, newline).trim();
+      runControlBuffer = runControlBuffer.slice(newline + 1);
       if (line.length === 0) {
         continue;
       }
-      handlePatchControlLine(line);
+      handleRunControlLine(line);
     }
   });
   socket.on("error", (error: Error) => {
     stopScopePolling();
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       connected: false,
       error: error.message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   });
   socket.on("close", () => {
     stopScopePolling();
-    if (patchControlSocket === socket) {
-      patchControlSocket = undefined;
-      patchControlBuffer = "";
-      rejectPendingPatchRequests(new Error("Patch control connection closed."));
-      patchPanelState = {
-        ...patchPanelState,
+    if (runControlSocket === socket) {
+      runControlSocket = undefined;
+      runControlBuffer = "";
+      rejectPendingRunRequests(new Error("Run control connection closed."));
+      runPanelState = {
+        ...runPanelState,
         connected: false,
       };
-      postPatchPanelState();
+      postRunPanelState();
     }
   });
 }
 
-function closePatchControlSocket(): void {
-  if (patchControlSocket) {
-    patchControlSocket.destroy();
-    patchControlSocket = undefined;
+function closeRunControlSocket(): void {
+  if (runControlSocket) {
+    runControlSocket.destroy();
+    runControlSocket = undefined;
   }
-  patchControlBuffer = "";
-  clearPatchParamDispatch();
-  rejectPendingPatchRequests(new Error("Patch control session ended."));
+  runControlBuffer = "";
+  clearRunParamDisrun();
+  rejectPendingRunRequests(new Error("Run control session ended."));
 }
 
-function handlePatchControlLine(line: string): void {
+function handleRunControlLine(line: string): void {
   const payload = JSON.parse(line) as { id?: number; ok?: boolean; result?: unknown; error?: string };
   if (typeof payload.id !== "number") {
     return;
   }
-  const pending = pendingPatchRequests.get(payload.id);
+  const pending = pendingRunRequests.get(payload.id);
   if (!pending) {
     return;
   }
-  pendingPatchRequests.delete(payload.id);
+  pendingRunRequests.delete(payload.id);
   if (payload.ok) {
     pending.resolve(payload.result);
   } else {
-    pending.reject(new Error(payload.error ?? "Patch control request failed."));
+    pending.reject(new Error(payload.error ?? "Run control request failed."));
   }
 }
 
-function rejectPendingPatchRequests(error: Error): void {
-  for (const pending of pendingPatchRequests.values()) {
+function rejectPendingRunRequests(error: Error): void {
+  for (const pending of pendingRunRequests.values()) {
     pending.reject(error);
   }
-  pendingPatchRequests.clear();
+  pendingRunRequests.clear();
 }
 
-async function refreshPatchParams(): Promise<void> {
+async function refreshRunParams(): Promise<void> {
   try {
-    const result = await sendPatchControlRequest<{ params: PatchParamPayload[] }>("getParams");
+    const result = await sendRunControlRequest<{ params: RunParamPayload[] }>("getParams");
     if (!result || !Array.isArray(result.params)) {
       return;
     }
-    patchPanelState = {
-      ...patchPanelState,
-      params: mergePatchParams(result.params, patchPanelState.params),
+    runPanelState = {
+      ...runPanelState,
+      params: mergeRunParams(result.params, runPanelState.params),
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-async function refreshPatchBuffers(): Promise<void> {
+async function refreshRunBuffers(): Promise<void> {
   try {
-    const result = await sendPatchControlRequest<{ buffers: PatchBufferPayload[] }>("getBuffers");
+    const result = await sendRunControlRequest<{ buffers: RunBufferPayload[] }>("getBuffers");
     if (!result || !Array.isArray(result.buffers)) {
       return;
     }
-    patchPanelState = {
-      ...patchPanelState,
-      buffers: mergePatchBuffers(result.buffers, patchPanelState.buffers),
+    runPanelState = {
+      ...runPanelState,
+      buffers: mergeRunBuffers(result.buffers, runPanelState.buffers),
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-async function refreshPatchEvents(): Promise<void> {
+async function refreshRunEvents(): Promise<void> {
   try {
-    const result = await sendPatchControlRequest<{ events: PatchEventPayload[] }>("getEvents");
+    const result = await sendRunControlRequest<{ events: RunEventPayload[] }>("getEvents");
     if (!result || !Array.isArray(result.events)) {
       return;
     }
-    patchPanelState = {
-      ...patchPanelState,
-      events: mergePatchEvents(result.events, patchPanelState.events),
+    runPanelState = {
+      ...runPanelState,
+      events: mergeRunEvents(result.events, runPanelState.events),
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-async function reapplyCachedPatchParams(): Promise<void> {
-  for (const param of patchPanelState.params) {
+async function reapplyCachedRunParams(): Promise<void> {
+  for (const param of runPanelState.params) {
     if (param.value === null) {
       continue;
     }
-    queuePatchParamSend(param.name, param.value);
+    queueRunParamSend(param.name, param.value);
   }
 }
 
-function reapplyCachedPatchBuffers(): void {
-  for (const buffer of patchPanelState.buffers) {
+function reapplyCachedRunBuffers(): void {
+  for (const buffer of runPanelState.buffers) {
     if (!buffer.loadedPath) {
       continue;
     }
-    void bindPatchBufferFile(buffer.name, buffer.loadedPath, { silent: true });
+    void bindRunBufferFile(buffer.name, buffer.loadedPath, { silent: true });
   }
 }
 
-function clearPatchParamDispatch(): void {
+function clearRunParamDisrun(): void {
 }
 
-function updatePatchParamState(
+function updateRunParamState(
   name: string,
-  update: (param: PatchParamState) => PatchParamState,
-): PatchParamState | undefined {
-  let nextParam: PatchParamState | undefined;
-  patchPanelState = {
-    ...patchPanelState,
-    params: patchPanelState.params.map((param) => {
+  update: (param: RunParamState) => RunParamState,
+): RunParamState | undefined {
+  let nextParam: RunParamState | undefined;
+  runPanelState = {
+    ...runPanelState,
+    params: runPanelState.params.map((param) => {
       if (param.name !== name) {
         return param;
       }
@@ -1018,7 +1018,7 @@ function updatePatchParamState(
   return nextParam;
 }
 
-function initialParamValue(param: Pick<PatchParamPayload, "type" | "value" | "default" | "rangeMin">): PatchScalarValue {
+function initialParamValue(param: Pick<RunParamPayload, "type" | "value" | "default" | "rangeMin">): RunScalarValue {
   if (param.type === "bool") {
     if (param.value !== null && param.value !== undefined) {
       return param.value !== 0;
@@ -1041,8 +1041,8 @@ function initialParamValue(param: Pick<PatchParamPayload, "type" | "value" | "de
 }
 
 function declaredParamDefaultValue(
-  param: Pick<PatchParamPayload, "type" | "default" | "rangeMin">,
-): PatchScalarValue {
+  param: Pick<RunParamPayload, "type" | "default" | "rangeMin">,
+): RunScalarValue {
   if (param.type === "bool") {
     if (param.default !== null && param.default !== undefined) {
       return param.default !== 0;
@@ -1059,8 +1059,8 @@ function declaredParamDefaultValue(
 }
 
 function initialEventArgValue(
-  arg: Pick<PatchEventArgPayload, "type" | "default" | "value">,
-): PatchScalarValue {
+  arg: Pick<RunEventArgPayload, "type" | "default" | "value">,
+): RunScalarValue {
   if (arg.default !== null && arg.default !== undefined) {
     if (arg.type === "bool") {
       return Boolean(arg.default);
@@ -1080,18 +1080,18 @@ function initialEventArgValue(
   return 0;
 }
 
-function patchParamDefaultValue(param: PatchParamState): PatchScalarValue {
+function runParamDefaultValue(param: RunParamState): RunScalarValue {
   return declaredParamDefaultValue(param);
 }
 
-function queuePatchParamSend(name: string, value: PatchScalarValue): void {
-  if (value === null || !patchPanelState.connected) {
+function queueRunParamSend(name: string, value: RunScalarValue): void {
+  if (value === null || !runPanelState.connected) {
     return;
   }
-  sendPatchControlNotification("setParam", { name, value });
+  sendRunControlNotification("setParam", { name, value });
 }
 
-function describePatchBufferChannels(buffer: PatchBufferPayload): string {
+function describeRunBufferChannels(buffer: RunBufferPayload): string {
   switch (buffer.channelsKind) {
     case "mono":
       return "mono";
@@ -1104,11 +1104,11 @@ function describePatchBufferChannels(buffer: PatchBufferPayload): string {
   }
 }
 
-function applyPatchParamChange(name: string, value: PatchScalarValue): void {
+function applyRunParamChange(name: string, value: RunScalarValue): void {
   if (value === null) {
     return;
   }
-  const param = updatePatchParamState(name, (current) => ({
+  const param = updateRunParamState(name, (current) => ({
     ...current,
     value,
   }));
@@ -1116,20 +1116,20 @@ function applyPatchParamChange(name: string, value: PatchScalarValue): void {
     return;
   }
 
-  if (!patchPanelState.connected) {
+  if (!runPanelState.connected) {
     return;
   }
-  queuePatchParamSend(name, value);
+  queueRunParamSend(name, value);
 }
 
-function updatePatchEventState(
+function updateRunEventState(
   name: string,
-  update: (event: PatchEventState) => PatchEventState,
-): PatchEventState | undefined {
-  let nextEvent: PatchEventState | undefined;
-  patchPanelState = {
-    ...patchPanelState,
-    events: patchPanelState.events.map((event) => {
+  update: (event: RunEventState) => RunEventState,
+): RunEventState | undefined {
+  let nextEvent: RunEventState | undefined;
+  runPanelState = {
+    ...runPanelState,
+    events: runPanelState.events.map((event) => {
       if (event.name !== name) {
         return event;
       }
@@ -1140,11 +1140,11 @@ function updatePatchEventState(
   return nextEvent;
 }
 
-async function triggerPatchEvent(
+async function triggerRunEvent(
   name: string,
-  values: PatchScalarValue[],
+  values: RunScalarValue[],
 ): Promise<void> {
-  const event = updatePatchEventState(name, (current) => ({
+  const event = updateRunEventState(name, (current) => ({
     ...current,
     args: current.args.map((arg, index) => ({
       ...arg,
@@ -1154,42 +1154,42 @@ async function triggerPatchEvent(
   if (!event) {
     return;
   }
-  postPatchPanelState();
+  postRunPanelState();
 
-  if (!patchPanelState.connected) {
+  if (!runPanelState.connected) {
     return;
   }
 
   try {
-    await sendPatchControlRequest("triggerEvent", {
+    await sendRunControlRequest("triggerEvent", {
       name,
       values: event.args.map((arg) => arg.value),
     });
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: undefined,
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-function resetPatchParams(): void {
-  clearPatchParamDispatch();
-  patchPanelState = {
-    ...patchPanelState,
+function resetRunParams(): void {
+  clearRunParamDisrun();
+  runPanelState = {
+    ...runPanelState,
     error: undefined,
-    params: patchPanelState.params.map((param) => ({
+    params: runPanelState.params.map((param) => ({
       ...param,
-      value: patchParamDefaultValue(param),
+      value: runParamDefaultValue(param),
     })),
-    events: patchPanelState.events.map((event) => ({
+    events: runPanelState.events.map((event) => ({
       ...event,
       args: event.args.map((arg) => ({
         ...arg,
@@ -1197,28 +1197,28 @@ function resetPatchParams(): void {
       })),
     })),
   };
-  postPatchPanelState();
+  postRunPanelState();
 
-  if (!patchPanelState.connected) {
+  if (!runPanelState.connected) {
     return;
   }
 
-  for (const param of patchPanelState.params) {
-    queuePatchParamSend(param.name, param.value);
+  for (const param of runPanelState.params) {
+    queueRunParamSend(param.name, param.value);
   }
 }
 
-async function bindPatchBufferFile(
+async function bindRunBufferFile(
   name: string,
   filePath: string,
   options?: { silent?: boolean },
 ): Promise<void> {
   try {
-    await sendPatchControlRequest("bindBufferWav", { name, path: filePath });
-    patchPanelState = {
-      ...patchPanelState,
+    await sendRunControlRequest("bindBufferWav", { name, path: filePath });
+    runPanelState = {
+      ...runPanelState,
       error: undefined,
-      buffers: patchPanelState.buffers.map((buffer) =>
+      buffers: runPanelState.buffers.map((buffer) =>
         buffer.name === name
           ? {
               ...buffer,
@@ -1227,27 +1227,27 @@ async function bindPatchBufferFile(
           : buffer,
       ),
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
     if (!options?.silent) {
-      void vscode.window.showErrorMessage(`Failed to bind preview buffer '${name}': ${message}`);
+      void vscode.window.showErrorMessage(`Failed to bind run buffer '${name}': ${message}`);
     }
   }
 }
 
-async function clearPatchBuffer(name: string): Promise<void> {
+async function clearRunBuffer(name: string): Promise<void> {
   try {
-    await sendPatchControlRequest("clearBuffer", { name });
-    patchPanelState = {
-      ...patchPanelState,
+    await sendRunControlRequest("clearBuffer", { name });
+    runPanelState = {
+      ...runPanelState,
       error: undefined,
-      buffers: patchPanelState.buffers.map((buffer) =>
+      buffers: runPanelState.buffers.map((buffer) =>
         buffer.name === name
           ? {
               ...buffer,
@@ -1256,18 +1256,18 @@ async function clearPatchBuffer(name: string): Promise<void> {
           : buffer,
       ),
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-async function choosePatchBufferFile(name: string): Promise<void> {
+async function chooseRunBufferFile(name: string): Promise<void> {
   const picked = await vscode.window.showOpenDialog({
     canSelectMany: false,
     openLabel: `Bind '${name}' buffer`,
@@ -1279,13 +1279,13 @@ async function choosePatchBufferFile(name: string): Promise<void> {
   if (!filePath) {
     return;
   }
-  await bindPatchBufferFile(name, filePath);
+  await bindRunBufferFile(name, filePath);
 }
 
-function clearPatchPanelMemory(): void {
-  clearPatchParamDispatch();
-  patchPanelState = {
-    ...patchPanelState,
+function clearRunPanelMemory(): void {
+  clearRunParamDisrun();
+  runPanelState = {
+    ...runPanelState,
     buffers: [],
     events: [],
     params: [],
@@ -1304,187 +1304,187 @@ function normalizeDeviceSelection(name: string | null | undefined): string | nul
   return trimmed.length > 0 ? trimmed : null;
 }
 
-async function updatePatchDeviceSelection(
+async function updateRunDeviceSelection(
   kind: "input" | "output",
   name: string | null | undefined,
 ): Promise<void> {
   const next = normalizeDeviceSelection(name);
-  patchPanelState = {
-    ...patchPanelState,
-    currentInputDevice: kind === "input" ? next : patchPanelState.currentInputDevice,
-    currentOutputDevice: kind === "output" ? next : patchPanelState.currentOutputDevice,
+  runPanelState = {
+    ...runPanelState,
+    currentInputDevice: kind === "input" ? next : runPanelState.currentInputDevice,
+    currentOutputDevice: kind === "output" ? next : runPanelState.currentOutputDevice,
     error: undefined,
   };
-  postPatchPanelState();
+  postRunPanelState();
 
-  if (!patchPanelState.running || !patchPanelState.path) {
+  if (!runPanelState.running || !runPanelState.path) {
     return;
   }
-  await runPatch(patchPanelState.path, { restart: true });
+  await runFile(runPanelState.path, { restart: true });
 }
 
-async function refreshPatchDevices(): Promise<void> {
+async function refreshRunDevices(): Promise<void> {
   try {
-    const result = await sendPatchControlRequest<{ inputDevices: string[]; outputDevices: string[] }>("getDevices");
-    patchPanelState = {
-      ...patchPanelState,
+    const result = await sendRunControlRequest<{ inputDevices: string[]; outputDevices: string[] }>("getDevices");
+    runPanelState = {
+      ...runPanelState,
       inputDevices: result.inputDevices ?? [],
       outputDevices: result.outputDevices ?? [],
       error: undefined,
     };
-    postPatchPanelState();
+    postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    patchPanelState = {
-      ...patchPanelState,
+    runPanelState = {
+      ...runPanelState,
       error: message,
     };
-    postPatchPanelState();
+    postRunPanelState();
   }
 }
 
-function sendPatchControlRequest<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+function sendRunControlRequest<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    if (!patchControlSocket || patchControlSocket.destroyed) {
-      reject(new Error("Patch control connection is not available."));
+    if (!runControlSocket || runControlSocket.destroyed) {
+      reject(new Error("Run control connection is not available."));
       return;
     }
-    const id = ++patchControlRequestId;
-    pendingPatchRequests.set(id, { resolve, reject });
+    const id = ++runControlRequestId;
+    pendingRunRequests.set(id, { resolve, reject });
     const request = JSON.stringify({
       id,
       command,
       ...payload,
     });
-    patchControlSocket.write(`${request}\n`, (error?: Error | null) => {
+    runControlSocket.write(`${request}\n`, (error?: Error | null) => {
       if (!error) {
         return;
       }
-      pendingPatchRequests.delete(id);
+      pendingRunRequests.delete(id);
       reject(error);
     });
   });
 }
 
-function sendPatchControlNotification(command: string, payload?: Record<string, unknown>): void {
-  if (!patchControlSocket || patchControlSocket.destroyed) {
+function sendRunControlNotification(command: string, payload?: Record<string, unknown>): void {
+  if (!runControlSocket || runControlSocket.destroyed) {
     return;
   }
   const request = JSON.stringify({
     command,
     ...payload,
   });
-  patchControlSocket.write(`${request}\n`);
+  runControlSocket.write(`${request}\n`);
 }
 
-function ensurePatchPanel(): void {
-  if (patchPanel) {
-    postPatchPanelState();
+function ensureRunPanel(): void {
+  if (runPanel) {
+    postRunPanelState();
     return;
   }
 
-  patchPanel = vscode.window.createWebviewPanel(
-    "ondaPatch",
-    "Onda Patch",
+  runPanel = vscode.window.createWebviewPanel(
+    "ondaRun",
+    "Onda Run",
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
     },
   );
-  patchPanelReady = false;
-  patchPanel.onDidDispose(() => {
+  runPanelReady = false;
+  runPanel.onDidDispose(() => {
     stopScopePolling();
-    patchPanelReady = false;
-    patchPanel = undefined;
-    void stopPatch({ silent: true });
-    clearPatchPanelMemory();
+    runPanelReady = false;
+    runPanel = undefined;
+    void stopFile({ silent: true });
+    clearRunPanelMemory();
   });
-  patchPanel.webview.onDidReceiveMessage(async (message: unknown) => {
+  runPanel.webview.onDidReceiveMessage(async (message: unknown) => {
     const payload = message as {
       type?: string;
       path?: string;
       name?: string | null;
-      value?: PatchScalarValue;
-      values?: PatchScalarValue[];
+      value?: RunScalarValue;
+      values?: RunScalarValue[];
       filePath?: string;
     };
     switch (payload.type) {
       case "webviewReady":
-        patchPanelReady = true;
-        postPatchPanelState();
-        if (patchPanelState.connected) {
-          void Promise.all([refreshPatchParams(), refreshPatchBuffers(), refreshPatchEvents()]);
+        runPanelReady = true;
+        postRunPanelState();
+        if (runPanelState.connected) {
+          void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]);
         }
         break;
       case "start":
-        await runPatch(payload.path ?? patchPanelState.path);
+        await runFile(payload.path ?? runPanelState.path);
         break;
       case "stop":
-        await stopPatch();
+        await stopFile();
         break;
       case "reset":
-        resetPatchParams();
+        resetRunParams();
         break;
       case "refreshDevices":
-        await refreshPatchDevices();
+        await refreshRunDevices();
         break;
       case "setParam":
         if (typeof payload.name === "string") {
-          applyPatchParamChange(payload.name, payload.value ?? null);
+          applyRunParamChange(payload.name, payload.value ?? null);
         }
         break;
       case "triggerEvent":
         if (typeof payload.name === "string") {
-          await triggerPatchEvent(payload.name, payload.values ?? []);
+          await triggerRunEvent(payload.name, payload.values ?? []);
         }
         break;
       case "setInputDevice":
-        await updatePatchDeviceSelection("input", payload.name);
+        await updateRunDeviceSelection("input", payload.name);
         break;
       case "setOutputDevice":
-        await updatePatchDeviceSelection("output", payload.name);
+        await updateRunDeviceSelection("output", payload.name);
         break;
       case "chooseBufferFile":
         if (typeof payload.name === "string") {
-          await choosePatchBufferFile(payload.name);
+          await chooseRunBufferFile(payload.name);
         }
         break;
       case "bindBufferFile":
         if (typeof payload.name === "string" && typeof payload.filePath === "string") {
-          await bindPatchBufferFile(payload.name, payload.filePath);
+          await bindRunBufferFile(payload.name, payload.filePath);
         }
         break;
       case "clearBuffer":
         if (typeof payload.name === "string") {
-          await clearPatchBuffer(payload.name);
+          await clearRunBuffer(payload.name);
         }
         break;
       default:
         break;
     }
   });
-  patchPanel.webview.html = renderSharedPreviewHtml(patchPanel.webview);
-  postPatchPanelState();
-  if (patchPanelState.connected) {
-    void Promise.all([refreshPatchParams(), refreshPatchBuffers(), refreshPatchEvents()]);
+  runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
+  postRunPanelState();
+  if (runPanelState.connected) {
+    void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]);
   }
 }
 
-function revealPatchPanel(): void {
-  if (!patchPanel) {
+function revealRunPanel(): void {
+  if (!runPanel) {
     return;
   }
-  patchPanel.reveal(patchPanel.viewColumn);
+  runPanel.reveal(runPanel.viewColumn);
 }
 
-function postPatchPanelState(): void {
-  if (!patchPanel) {
+function postRunPanelState(): void {
+  if (!runPanel) {
     return;
   }
-  void patchPanel.webview.postMessage({
+  void runPanel.webview.postMessage({
     type: "state",
-    state: patchPanelState,
+    state: runPanelState,
   });
 }
 
@@ -1502,15 +1502,15 @@ function stopScopePolling(): void {
 }
 
 function pollScopeData(): void {
-  if (scopePollingInFlight || !patchPanelState.connected || !patchPanel || !patchPanelReady) {
+  if (scopePollingInFlight || !runPanelState.connected || !runPanel || !runPanelReady) {
     return;
   }
   scopePollingInFlight = true;
-  sendPatchControlRequest<{ channels: number; samples: number[] }>("getScopeData", { maxFrames: SCOPE_MAX_FRAMES })
+  sendRunControlRequest<{ channels: number; samples: number[] }>("getScopeData", { maxFrames: SCOPE_MAX_FRAMES })
     .then((result) => {
       scopePollingInFlight = false;
-      if (patchPanel && patchPanelReady) {
-        void patchPanel.webview.postMessage({
+      if (runPanel && runPanelReady) {
+        void runPanel.webview.postMessage({
           type: "scopeData",
           channels: result.channels,
           samples: result.samples,
@@ -1522,8 +1522,8 @@ function pollScopeData(): void {
     });
 }
 
-function renderSharedPreviewHtml(webview: vscode.Webview): string {
-  const previewTheme = ondaPreviewThemeSetting();
+function renderSharedRunHtml(webview: vscode.Webview): string {
+  const runTheme = ondaRunThemeSetting();
   const csp = [
     "default-src 'none'",
     "img-src data: https:",
@@ -1531,13 +1531,13 @@ function renderSharedPreviewHtml(webview: vscode.Webview): string {
     `script-src ${webview.cspSource} 'unsafe-inline'`,
   ].join("; ");
 
-  // Locate the preview HTML.
-  // In a packaged extension it lives at <extensionPath>/out/preview.html (copied at build time).
-  // During development it also exists at <extensionPath>/ui/preview/preview.html.
+  // Locate the run HTML.
+  // In a packaged extension it lives at <extensionPath>/out/run.html (copied at build time).
+  // During development it also exists at <extensionPath>/ui/run/run.html.
   const extRoot = extensionContext?.extensionPath ?? __dirname;
   const candidates = [
-    path.join(extRoot, "out", "preview.html"),
-    path.join(extRoot, "ui", "preview", "preview.html"),
+    path.join(extRoot, "out", "run.html"),
+    path.join(extRoot, "ui", "run", "run.html"),
   ];
   let html: string | undefined;
   let resolvedPath = "";
@@ -1552,13 +1552,13 @@ function renderSharedPreviewHtml(webview: vscode.Webview): string {
   }
   if (html === undefined) {
     return `<!DOCTYPE html><html><body style="color:#e07a7a;padding:20px;font:14px sans-serif">
-      <p>Could not load preview UI.</p>
+      <p>Could not load run UI.</p>
       <p>Searched:<br/>${candidates.map((c) => `<code>${c}</code>`).join("<br/>")}</p>
     </body></html>`;
   }
 
   // Inject the VS Code host bridge before the page script runs, and add the CSP header.
-  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${previewTheme}" };</script>`;
+  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${runTheme}" };</script>`;
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}" />`;
 
   // Insert CSP meta after <head> and bridge script before the main <script>.
@@ -1568,18 +1568,18 @@ function renderSharedPreviewHtml(webview: vscode.Webview): string {
   return html;
 }
 
-function ondaPreviewThemeSetting(): "auto" | "dark" | "light" {
+function ondaRunThemeSetting(): "auto" | "dark" | "light" {
   const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("preview.theme", "auto");
+  const value = config.get<string>("run.theme", "auto");
   if (value === "dark" || value === "light") {
     return value;
   }
   return "auto";
 }
 
-function ondaPreviewHostSetting(): "webview" | "egui" {
+function ondaRunHostSetting(): "webview" | "egui" {
   const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("preview.host", "webview");
+  const value = config.get<string>("run.host", "webview");
   return value === "egui" ? "egui" : "webview";
 }
 

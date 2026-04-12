@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -19,8 +19,8 @@
   "activationEvents": [
     "onLanguage:onda",
     "onCommand:onda.restartLanguageServer",
-    "onCommand:onda.runPatch",
-    "onCommand:onda.stopPatch"
+    "onCommand:onda.runFile",
+    "onCommand:onda.stopFile"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -84,12 +84,12 @@
     ],
     "commands": [
       {
-        "command": "onda.runPatch",
-        "title": "Onda: Run Patch"
+        "command": "onda.runFile",
+        "title": "Onda: Run File"
       },
       {
-        "command": "onda.stopPatch",
-        "title": "Onda: Stop Patch"
+        "command": "onda.stopFile",
+        "title": "Onda: Stop File"
       },
       {
         "command": "onda.restartLanguageServer",
@@ -111,7 +111,7 @@
           },
           "description": "Additional arguments passed before the built-in 'lsp' subcommand."
         },
-        "onda.preview.theme": {
+        "onda.run.theme": {
           "type": "string",
           "enum": [
             "auto",
@@ -119,23 +119,23 @@
             "light"
           ],
           "default": "auto",
-          "description": "Theme used by the Onda patch preview panel."
+          "description": "Theme used by the Onda run panel."
         },
-        "onda.preview.host": {
+        "onda.run.host": {
           "type": "string",
           "enum": [
             "webview",
             "egui"
           ],
           "default": "webview",
-          "description": "Host used by Onda: Run Patch. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui preview window."
+          "description": "Host used by Onda: Run File. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui run window."
         }
       }
     }
   },
   "scripts": {
-    "copy-preview": "node -e \"require('fs').cpSync('./ui/preview/preview.html','./out/preview.html')\"",
-    "compile": "tsc -p ./ && npm run copy-preview",
+    "copy-run-ui": "node -e \"require('fs').cpSync('./ui/run/run.html','./out/run.html')\"",
+    "compile": "tsc -p ./ && npm run copy-run-ui",
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
