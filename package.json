@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -140,8 +140,8 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/node": "^20.14.10",
-    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.19.39",
+    "@types/vscode": "^1.115.0",
     "typescript": "^5.5.4"
   },
   "dependencies": {

@@ -28,7 +28,7 @@ If you already have a packaged `.vsix`, install it with one of these:
 - CLI:
 
 ```bash
-code --install-extension onda-vscode-0.1.4.vsix
+code --install-extension onda-vscode-0.1.5.vsix
 ```
 
 ### Option 2: build a `.vsix` locally from this repo
@@ -44,7 +44,7 @@ npx @vscode/vsce package
 That produces a `.vsix` file in the repo root, which you can then install with:
 
 ```bash
-code --install-extension ./onda-vscode-0.1.4.vsix
+code --install-extension ./onda-vscode-0.1.5.vsix
 ```
 
 If you prefer the UI, use `Extensions: Install from VSIX...` and select the generated file.

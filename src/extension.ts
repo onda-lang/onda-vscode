@@ -517,9 +517,26 @@ function mergePatchParams(
       const previous = existing.find((item) => item.name === param.name);
       return {
         ...param,
-        value: previous?.value ?? initialParamValue(param),
+        value:
+          previous && patchParamsMatchForPreservation(param, previous)
+            ? previous.value
+            : initialParamValue(param),
       };
     });
+}
+
+function patchParamsMatchForPreservation(
+  next: PatchParamPayload,
+  previous: PatchParamState,
+): boolean {
+  return (
+    next.name === previous.name &&
+    next.type === previous.type &&
+    next.default === previous.default &&
+    next.rangeMin === previous.rangeMin &&
+    next.rangeMax === previous.rangeMax &&
+    next.scalar === previous.scalar
+  );
 }
 
 function mergePatchBuffers(
@@ -1352,4 +1369,3 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   client = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
   await client.start();
 }
-

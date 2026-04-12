@@ -1,19 +1,22 @@
 {
   "compilerOptions": {
-    "module": "commonjs",
-    "target": "es2020",
-    "lib": [
-      "es2020"
-    ],
-    "outDir": "out",
+    "target": "ES2020",
+
+    "module": "Node16",
+    "moduleResolution": "node16",
+
+    "lib": ["ES2022"],
+    "types": ["node", "vscode"],
+
     "rootDir": "src",
+    "outDir": "out",
+
     "strict": true,
     "sourceMap": true,
     "esModuleInterop": true,
-    "moduleResolution": "node",
-    "skipLibCheck": true
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }
