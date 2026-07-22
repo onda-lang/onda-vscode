@@ -115,6 +115,8 @@ let scopePollingInFlight = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 50;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
+const UNBOUND_BUFFERS_MESSAGE = "Bind all buffers to start processing";
+const preservedRunBufferPaths = new Map<string, string>();
 let runPanelState: RunPanelState = {
   running: false,
   connected: false,
@@ -190,6 +192,10 @@ async function runFile(preferredPath?: string, options?: { restart?: boolean }):
   if (!fsPath) {
     return;
   }
+  const preserveRunState = runPanelState.path === fsPath;
+  if (!preserveRunState) {
+    preservedRunBufferPaths.clear();
+  }
   const runHost = ondaRunHostSetting();
   const runTheme = ondaRunThemeSetting();
 
@@ -199,17 +205,17 @@ async function runFile(preferredPath?: string, options?: { restart?: boolean }):
     runPanel.dispose();
   }
   const preservedParams =
-    runPanelState.path === fsPath ? runPanelState.params : [];
+    preserveRunState ? runPanelState.params : [];
   const preservedEvents =
-    runPanelState.path === fsPath ? runPanelState.events : [];
+    preserveRunState ? runPanelState.events : [];
   runPanelState = {
     running: false,
     connected: false,
     path: fsPath,
     status: `Starting ${path.basename(fsPath)}...`,
     error: undefined,
-    outputChannels: runPanelState.path === fsPath ? runPanelState.outputChannels : 0,
-    buffers: runPanelState.path === fsPath ? runPanelState.buffers : [],
+    outputChannels: preserveRunState ? runPanelState.outputChannels : 0,
+    buffers: preserveRunState ? runPanelState.buffers : [],
     events: preservedEvents,
     params: preservedParams,
     inputDevices: runPanelState.inputDevices,
@@ -329,9 +335,8 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
     }
     runPanelState = {
       ...runPanelState,
-      running: false,
       connected: false,
-      status: "Stopped",
+      ...runBufferProcessingState(runPanelState.buffers),
     };
     postRunPanelState();
     return;
@@ -345,10 +350,9 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
 
   runPanelState = {
     ...runPanelState,
-    running: false,
     connected: false,
     path: options?.preservePath ?? runningPath,
-    status: "Stopped",
+    ...runBufferProcessingState(runPanelState.buffers),
     error: undefined,
   };
   postRunPanelState();
@@ -727,14 +731,14 @@ function handleRunStdoutLine(line: string): void {
   try {
     const payload = JSON.parse(line) as RunReadyEvent;
     if (payload.event === "ready") {
+      const buffers = payload.buffers ?? [];
       runPanelState = {
-        running: true,
+        ...runBufferProcessingState(buffers),
         connected: false,
         path: runPath,
-        status: "Running",
         error: undefined,
         outputChannels: payload.outputChannels ?? 0,
-        buffers: mergeRunBuffers(payload.buffers ?? [], runPanelState.buffers),
+        buffers,
         events: mergeRunEvents(payload.events ?? [], runPanelState.events),
         params: mergeRunParams(payload.params, runPanelState.params),
         inputDevices: payload.inputDevices ?? [],
@@ -787,17 +791,14 @@ function runParamsMatchForPreservation(
   );
 }
 
-function mergeRunBuffers(
-  buffers: RunBufferPayload[],
-  existing: RunBufferState[],
-): RunBufferState[] {
-  return buffers.map((buffer) => {
-    const previous = existing.find((item) => item.name === buffer.name);
-    return {
-      ...buffer,
-      loadedPath: previous?.loadedPath ?? buffer.loadedPath,
-    };
-  });
+function runBufferProcessingState(
+  buffers: RunBufferState[],
+): Pick<RunPanelState, "running" | "status"> {
+  if (buffers.some((buffer) => !buffer.loadedPath)) {
+    return { running: false, status: UNBOUND_BUFFERS_MESSAGE };
+  }
+  const running = runProcess !== undefined;
+  return { running, status: running ? "Running" : "Stopped" };
 }
 
 function mergeRunEvents(
@@ -833,7 +834,7 @@ function connectRunControl(port: number): void {
     runPanelState = {
       ...runPanelState,
       connected: true,
-      status: "Running",
+      ...runBufferProcessingState(runPanelState.buffers),
       error: undefined,
     };
     postRunPanelState();
@@ -841,7 +842,9 @@ function connectRunControl(port: number): void {
       reapplyCachedRunParams();
       reapplyCachedRunBuffers();
     });
-    startScopePolling();
+    if (runPanelState.running) {
+      startScopePolling();
+    }
   });
   socket.on("data", (chunk: string) => {
     runControlBuffer += chunk;
@@ -945,8 +948,14 @@ async function refreshRunBuffers(): Promise<void> {
     }
     runPanelState = {
       ...runPanelState,
-      buffers: mergeRunBuffers(result.buffers, runPanelState.buffers),
+      buffers: result.buffers,
+      ...runBufferProcessingState(result.buffers),
     };
+    if (runPanelState.running && runPanelState.connected) {
+      startScopePolling();
+    } else {
+      stopScopePolling();
+    }
     postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -989,11 +998,12 @@ async function reapplyCachedRunParams(): Promise<void> {
 }
 
 function reapplyCachedRunBuffers(): void {
-  for (const buffer of runPanelState.buffers) {
-    if (!buffer.loadedPath) {
+  const declaredBuffers = new Set(runPanelState.buffers.map((buffer) => buffer.name));
+  for (const [name, filePath] of preservedRunBufferPaths) {
+    if (!declaredBuffers.has(name)) {
       continue;
     }
-    void bindRunBufferFile(buffer.name, buffer.loadedPath, { silent: true });
+    void bindRunBufferFile(name, filePath, { silent: true });
   }
 }
 
@@ -1215,18 +1225,24 @@ async function bindRunBufferFile(
 ): Promise<void> {
   try {
     await sendRunControlRequest("bindBufferWav", { name, path: filePath });
+    preservedRunBufferPaths.set(name, filePath);
+    const buffers = runPanelState.buffers.map((buffer) =>
+      buffer.name === name
+        ? {
+            ...buffer,
+            loadedPath: filePath,
+          }
+        : buffer,
+    );
     runPanelState = {
       ...runPanelState,
       error: undefined,
-      buffers: runPanelState.buffers.map((buffer) =>
-        buffer.name === name
-          ? {
-              ...buffer,
-              loadedPath: filePath,
-            }
-          : buffer,
-      ),
+      buffers,
+      ...runBufferProcessingState(buffers),
     };
+    if (runPanelState.running && runPanelState.connected) {
+      startScopePolling();
+    }
     postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1244,18 +1260,22 @@ async function bindRunBufferFile(
 async function clearRunBuffer(name: string): Promise<void> {
   try {
     await sendRunControlRequest("clearBuffer", { name });
+    preservedRunBufferPaths.delete(name);
+    const buffers = runPanelState.buffers.map((buffer) =>
+      buffer.name === name
+        ? {
+            ...buffer,
+            loadedPath: null,
+          }
+        : buffer,
+    );
     runPanelState = {
       ...runPanelState,
       error: undefined,
-      buffers: runPanelState.buffers.map((buffer) =>
-        buffer.name === name
-          ? {
-              ...buffer,
-              loadedPath: null,
-            }
-          : buffer,
-      ),
+      buffers,
+      ...runBufferProcessingState(buffers),
     };
+    stopScopePolling();
     postRunPanelState();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1284,6 +1304,7 @@ async function chooseRunBufferFile(name: string): Promise<void> {
 
 function clearRunPanelMemory(): void {
   clearRunParamDisrun();
+  preservedRunBufferPaths.clear();
   runPanelState = {
     ...runPanelState,
     buffers: [],

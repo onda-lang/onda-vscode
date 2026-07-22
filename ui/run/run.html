@@ -559,6 +559,21 @@
               const input = document.createElement("input");
               input.type = "file";
               input.accept = ".wav,audio/wav,audio/x-wav";
+              input.hidden = true;
+
+              let settled = false;
+              const cleanup = () => {
+                if (settled) return;
+                settled = true;
+                window.removeEventListener("focus", cleanupAfterCancel);
+                input.remove();
+              };
+              const cleanupAfterCancel = () => {
+                setTimeout(() => {
+                  if (!input.files?.length) cleanup();
+                }, 0);
+              };
+
               input.addEventListener("change", () => {
                 const file = input.files && input.files[0];
                 if (file) {
@@ -567,8 +582,10 @@
                     message: { type: "bindBufferFile", name, file },
                   }, targetOrigin);
                 }
-                input.remove();
+                cleanup();
               }, { once: true });
+              input.addEventListener("cancel", cleanup, { once: true });
+              window.addEventListener("focus", cleanupAfterCancel, { once: true });
               document.body.appendChild(input);
               input.click();
             },
@@ -643,6 +660,7 @@
         path: "",
         status: "Stopped",
         error: "",
+        sourceDirty: false,
         buffers: [],
         events: [],
         params: [],
@@ -745,6 +763,8 @@
         if (!run && !stop) return;
         event.preventDefault();
         if (event.repeat) return;
+        if (run && startButton.disabled) return;
+        if (stop && stopButton.disabled) return;
         hostBridge.postMessage(run
           ? { type: "start", path: state.path || undefined }
           : { type: "stop" });
@@ -1201,7 +1221,7 @@
         statusNode.textContent = state.connected ? state.status : state.running ? state.status + " (connecting controls...)" : state.status;
         errorNode.textContent = state.error || "";
         errorNode.style.display = state.error ? "block" : "none";
-        scopeSection.style.display = state.connected ? "block" : "none";
+        scopeSection.style.display = state.running ? "block" : "none";
         const hasBuffers = state.buffers.length > 0;
         const hasEvents = state.events.length > 0;
         const hasParams = state.params.length > 0;
@@ -1215,7 +1235,9 @@
         refreshDevicesButton.hidden = !supportsDeviceSelection;
         ioSettingsNode.hidden = !supportsDeviceSelection;
         ioSettingsNode.style.display = hasIoSettings ? "grid" : "none";
-        startButton.disabled = !state.path || state.running;
+        const buffersReady = state.buffers.every(buffer => Boolean(buffer.loadedPath));
+        const canStart = buffersReady || Boolean(state.sourceDirty);
+        startButton.disabled = !state.path || state.running || !canStart;
         stopButton.disabled = !state.running;
         resetButton.disabled = !hasParams && !hasEvents;
         renderDeviceOptions(inputDeviceNode, state.inputDevices, state.currentInputDevice, true);
