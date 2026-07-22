@@ -12,6 +12,7 @@ This extension adds VSCode support for Onda:
 ## Requirements
 
 - VSCode 1.90 or newer
+- Onda 0.5.0 or newer
 - an `onda` executable available on `PATH`, or an explicit configured path
 
 ## Install
@@ -28,7 +29,7 @@ If you already have a packaged `.vsix`, install it with one of these:
 - CLI:
 
 ```bash
-code --install-extension onda-vscode-0.1.7.vsix
+code --install-extension onda-vscode-0.1.8.vsix
 ```
 
 ### Option 2: build a `.vsix` locally from this repo
@@ -44,7 +45,7 @@ npx @vscode/vsce package
 That produces a `.vsix` file in the repo root, which you can then install with:
 
 ```bash
-code --install-extension ./onda-vscode-0.1.7.vsix
+code --install-extension ./onda-vscode-0.1.8.vsix
 ```
 
 If you prefer the UI, use `Extensions: Install from VSIX...` and select the generated file.

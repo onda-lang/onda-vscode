@@ -58,7 +58,7 @@
       "patterns": [
         {
           "name": "meta.section.header.onda",
-          "match": "^(\\s*)(ins|outs|params|const|events|buffers|init|block|sample|graph)(?=\\s*(?:<|\\d|[:{(A-Za-z_]))(\\s*<[^>\\n]+>)?(\\s+\\d+)?(\\s*(?::|\\{))?",
+          "match": "^(\\s*)(ins|inputs|outs|outputs|kouts|params|kins|const|events|buffers|init|block|sample|graph)(?=\\s*(?:<|\\d|[:{(A-Za-z_]))(\\s*<[^>\\n]+>)?(\\s+\\d+)?(\\s*(?::|\\{))?",
           "captures": {
             "2": {
               "name": "storage.type.block.onda"
@@ -175,7 +175,7 @@
       "patterns": [
         {
           "name": "keyword.control.onda",
-          "match": "\\b(if|elif|else|for|in|while|loop|break|continue|return|assert)\\b"
+          "match": "\\b(if|elif|else|for|in|while|loop|break|continue|return|assert|import|include|use|as|pub|pin)\\b"
         },
         {
           "name": "constant.language.onda",

@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -134,8 +134,9 @@
     }
   },
   "scripts": {
+    "clean": "node -e \"require('fs').rmSync('./out',{recursive:true,force:true})\"",
     "copy-run-ui": "node -e \"require('fs').cpSync('./ui/run/run.html','./out/run.html')\"",
-    "compile": "tsc -p ./ && npm run copy-run-ui",
+    "compile": "npm run clean && tsc -p ./ && npm run copy-run-ui",
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
