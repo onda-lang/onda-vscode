@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -129,6 +129,18 @@
           ],
           "default": "webview",
           "description": "Host used by Onda: Run File. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui run window."
+        },
+        "onda.run.sampleRate": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 48000,
+          "description": "Sample rate in Hz used by Onda: Run File."
+        },
+        "onda.run.blockSize": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 256,
+          "description": "Compile block size in frames used by Onda: Run File."
         }
       }
     }

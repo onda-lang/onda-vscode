@@ -29,7 +29,7 @@ If you already have a packaged `.vsix`, install it with one of these:
 - CLI:
 
 ```bash
-code --install-extension onda-vscode-0.1.8.vsix
+code --install-extension onda-vscode-0.1.10.vsix
 ```
 
 ### Option 2: build a `.vsix` locally from this repo
@@ -45,7 +45,7 @@ npx @vscode/vsce package
 That produces a `.vsix` file in the repo root, which you can then install with:
 
 ```bash
-code --install-extension ./onda-vscode-0.1.8.vsix
+code --install-extension ./onda-vscode-0.1.10.vsix
 ```
 
 If you prefer the UI, use `Extensions: Install from VSIX...` and select the generated file.
@@ -58,17 +58,23 @@ By default the extension starts:
 onda lsp
 ```
 
-You can override the executable and prepend extra args in VSCode settings:
+You can configure the executable and run host in VSCode settings:
 
 - `onda.server.path`
 - `onda.server.args`
+- `onda.run.host` (`webview` or `egui`)
+- `onda.run.theme` (`auto`, `dark`, or `light`)
+- `onda.run.sampleRate` (default: `48000` Hz)
+- `onda.run.blockSize` (default: `256` frames)
 
 Example settings:
 
 ```json
 {
   "onda.server.path": "C:/path/to/onda.exe",
-  "onda.server.args": []
+  "onda.server.args": [],
+  "onda.run.sampleRate": 48000,
+  "onda.run.blockSize": 256
 }
 ```
 
@@ -76,10 +82,13 @@ Or on macOS/Linux:
 
 ```json
 {
-  "onda.server.path": "/path/to/onda",
-  "onda.server.args": []
+  "onda.server.path": "/path/to/onda"
 }
 ```
+
+The sample rate and block size are passed to both the embedded webview and
+native egui run hosts. Changing either setting takes effect the next time you
+run a file.
 
 ## Using the extension
 

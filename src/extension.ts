@@ -11,6 +11,7 @@ import {
 } from "vscode-languageclient/node";
 
 type RunScalarValue = boolean | number | null;
+type RunEventValue = RunScalarValue | RunEventValue[];
 
 interface RunParamPayload {
   index: number;
@@ -40,12 +41,12 @@ interface RunEventArgPayload {
   index: number;
   name: string;
   type: string;
-  default?: RunScalarValue;
-  value?: RunScalarValue;
+  default?: RunEventValue;
+  value?: RunEventValue;
 }
 
 interface RunEventArgState extends RunEventArgPayload {
-  value: RunScalarValue;
+  value: RunEventValue;
 }
 
 interface RunEventPayload {
@@ -88,6 +89,8 @@ interface RunPanelState {
   outputDevices: string[];
   currentInputDevice: string | null;
   currentOutputDevice: string | null;
+  sampleRateHz: number;
+  blockFrames: number;
 }
 
 interface PendingControlRequest {
@@ -99,6 +102,7 @@ let client: LanguageClient | undefined;
 let extensionContext: vscode.ExtensionContext | undefined;
 let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
+let runProcessingRequested = false;
 let runOutput: vscode.OutputChannel | undefined;
 let serverOutput: vscode.OutputChannel | undefined;
 let runPanel: vscode.WebviewPanel | undefined;
@@ -115,6 +119,8 @@ let scopePollingInFlight = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 50;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
+const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
+const DEFAULT_RUN_BLOCK_FRAMES = 256;
 const UNBOUND_BUFFERS_MESSAGE = "Bind all buffers to start processing";
 const preservedRunBufferPaths = new Map<string, string>();
 let runPanelState: RunPanelState = {
@@ -129,6 +135,8 @@ let runPanelState: RunPanelState = {
   outputDevices: [],
   currentInputDevice: null,
   currentOutputDevice: null,
+  sampleRateHz: DEFAULT_RUN_SAMPLE_RATE_HZ,
+  blockFrames: DEFAULT_RUN_BLOCK_FRAMES,
 };
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -198,12 +206,26 @@ async function runFile(preferredPath?: string, options?: { restart?: boolean }):
   }
   const runHost = ondaRunHostSetting();
   const runTheme = ondaRunThemeSetting();
+  const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
+  const runSettingsChanged =
+    runPanelState.sampleRateHz !== sampleRateHz ||
+    runPanelState.blockFrames !== blockFrames;
 
   if (runHost === "webview") {
     ensureRunPanel();
   } else if (runPanel) {
     runPanel.dispose();
   }
+  if (runProcess && runPath === fsPath && !options?.restart && !runSettingsChanged) {
+    if (runHost === "webview") {
+      revealRunPanel();
+      if (runPanelState.connected && !runProcessingRequested) {
+        await playRunProcessing();
+      }
+    }
+    return;
+  }
+
   const preservedParams =
     preserveRunState ? runPanelState.params : [];
   const preservedEvents =
@@ -222,23 +244,25 @@ async function runFile(preferredPath?: string, options?: { restart?: boolean }):
     outputDevices: runPanelState.outputDevices,
     currentInputDevice: runPanelState.currentInputDevice,
     currentOutputDevice: runPanelState.currentOutputDevice,
+    sampleRateHz,
+    blockFrames,
   };
   postRunPanelState();
 
-  if (runProcess && runPath === fsPath && !options?.restart) {
-    if (runHost === "webview") {
-      revealRunPanel();
-    }
-    return;
-  }
-
   await stopFile({ silent: true, preservePath: fsPath });
+  runProcessingRequested = true;
 
   const { command, extraArgs } = ondaExecutableConfig();
   const args =
     runHost === "egui"
       ? [...extraArgs, "run", fsPath, "--theme", runTheme]
       : [...extraArgs, "run", "play", fsPath, "--forever", "--control-json"];
+  args.push(
+    "--sample-rate",
+    runPanelState.sampleRateHz.toString(),
+    "--block-size",
+    runPanelState.blockFrames.toString(),
+  );
   if (runPanelState.currentInputDevice) {
     args.push("--input-device", runPanelState.currentInputDevice);
   }
@@ -328,8 +352,45 @@ async function runFile(preferredPath?: string, options?: { restart?: boolean }):
   });
 }
 
+async function playRunProcessing(): Promise<void> {
+  await setRunProcessing(true);
+}
+
+async function pauseRunProcessing(): Promise<void> {
+  await setRunProcessing(false);
+}
+
+async function setRunProcessing(playing: boolean): Promise<void> {
+  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed) {
+    return;
+  }
+  try {
+    await sendRunControlRequest(playing ? "play" : "pause");
+    runProcessingRequested = playing;
+    runPanelState = {
+      ...runPanelState,
+      ...runBufferProcessingState(runPanelState.buffers),
+      error: undefined,
+    };
+    if (runPanelState.running) {
+      startScopePolling();
+    } else {
+      stopScopePolling();
+    }
+    postRunPanelState();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    runPanelState = {
+      ...runPanelState,
+      error: message,
+    };
+    postRunPanelState();
+  }
+}
+
 async function stopFile(options?: { silent?: boolean; preservePath?: string }): Promise<void> {
   if (!runProcess) {
+    runProcessingRequested = false;
     if (!options?.silent) {
       void vscode.window.showInformationMessage("No Onda run is currently running.");
     }
@@ -365,6 +426,7 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
 function clearRunRuntimeState(options?: { preservePath?: string }): void {
   runProcess = undefined;
   runPath = options?.preservePath;
+  runProcessingRequested = false;
   runStdoutBuffer = "";
   closeRunControlSocket();
 }
@@ -745,6 +807,8 @@ function handleRunStdoutLine(line: string): void {
         outputDevices: payload.outputDevices ?? [],
         currentInputDevice: payload.currentInputDevice ?? null,
         currentOutputDevice: payload.currentOutputDevice ?? null,
+        sampleRateHz: runPanelState.sampleRateHz,
+        blockFrames: runPanelState.blockFrames,
       };
       postRunPanelState();
       connectRunControl(payload.port);
@@ -797,7 +861,7 @@ function runBufferProcessingState(
   if (buffers.some((buffer) => !buffer.loadedPath)) {
     return { running: false, status: UNBOUND_BUFFERS_MESSAGE };
   }
-  const running = runProcess !== undefined;
+  const running = runProcess !== undefined && runProcessingRequested;
   return { running, status: running ? "Running" : "Stopped" };
 }
 
@@ -838,7 +902,12 @@ function connectRunControl(port: number): void {
       error: undefined,
     };
     postRunPanelState();
-    void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]).then(() => {
+    void Promise.all([
+      refreshRunParams(),
+      refreshRunBuffers(),
+      refreshRunEvents(),
+      refreshRunDevices(),
+    ]).then(() => {
       reapplyCachedRunParams();
       reapplyCachedRunBuffers();
     });
@@ -1070,7 +1139,10 @@ function declaredParamDefaultValue(
 
 function initialEventArgValue(
   arg: Pick<RunEventArgPayload, "type" | "default" | "value">,
-): RunScalarValue {
+): RunEventValue {
+  if (Array.isArray(arg.default)) {
+    return arg.default.map(cloneRunEventValue);
+  }
   if (arg.default !== null && arg.default !== undefined) {
     if (arg.type === "bool") {
       return Boolean(arg.default);
@@ -1080,14 +1152,24 @@ function initialEventArgValue(
   }
   if (arg.type === "bool") {
     if (arg.value !== null && arg.value !== undefined) {
+      if (Array.isArray(arg.value)) {
+        return arg.value.map(cloneRunEventValue);
+      }
       return arg.value !== 0;
     }
     return false;
+  }
+  if (Array.isArray(arg.value)) {
+    return arg.value.map(cloneRunEventValue);
   }
   if (arg.value !== null && arg.value !== undefined) {
     return arg.value;
   }
   return 0;
+}
+
+function cloneRunEventValue(value: RunEventValue): RunEventValue {
+  return Array.isArray(value) ? value.map(cloneRunEventValue) : value;
 }
 
 function runParamDefaultValue(param: RunParamState): RunScalarValue {
@@ -1152,7 +1234,7 @@ function updateRunEventState(
 
 async function triggerRunEvent(
   name: string,
-  values: RunScalarValue[],
+  values: RunEventValue[],
 ): Promise<void> {
   const event = updateRunEventState(name, (current) => ({
     ...current,
@@ -1345,6 +1427,9 @@ async function updateRunDeviceSelection(
 }
 
 async function refreshRunDevices(): Promise<void> {
+  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed) {
+    return;
+  }
   try {
     const result = await sendRunControlRequest<{ inputDevices: string[]; outputDevices: string[] }>("getDevices");
     runPanelState = {
@@ -1427,7 +1512,7 @@ function ensureRunPanel(): void {
       path?: string;
       name?: string | null;
       value?: RunScalarValue;
-      values?: RunScalarValue[];
+      values?: RunEventValue[];
       filePath?: string;
     };
     switch (payload.type) {
@@ -1435,14 +1520,23 @@ function ensureRunPanel(): void {
         runPanelReady = true;
         postRunPanelState();
         if (runPanelState.connected) {
-          void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]);
+          void Promise.all([
+            refreshRunParams(),
+            refreshRunBuffers(),
+            refreshRunEvents(),
+            refreshRunDevices(),
+          ]);
         }
         break;
       case "start":
-        await runFile(payload.path ?? runPanelState.path);
+        if (runProcess && runPanelState.connected) {
+          await playRunProcessing();
+        } else {
+          await runFile(payload.path ?? runPanelState.path);
+        }
         break;
       case "stop":
-        await stopFile();
+        await pauseRunProcessing();
         break;
       case "reset":
         resetRunParams();
@@ -1488,7 +1582,12 @@ function ensureRunPanel(): void {
   runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
   postRunPanelState();
   if (runPanelState.connected) {
-    void Promise.all([refreshRunParams(), refreshRunBuffers(), refreshRunEvents()]);
+    void Promise.all([
+      refreshRunParams(),
+      refreshRunBuffers(),
+      refreshRunEvents(),
+      refreshRunDevices(),
+    ]);
   }
 }
 
@@ -1602,6 +1701,31 @@ function ondaRunHostSetting(): "webview" | "egui" {
   const config = vscode.workspace.getConfiguration("onda");
   const value = config.get<string>("run.host", "webview");
   return value === "egui" ? "egui" : "webview";
+}
+
+function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number } {
+  const config = vscode.workspace.getConfiguration("onda");
+  return {
+    sampleRateHz: positiveIntegerSetting(
+      config,
+      "run.sampleRate",
+      DEFAULT_RUN_SAMPLE_RATE_HZ,
+    ),
+    blockFrames: positiveIntegerSetting(
+      config,
+      "run.blockSize",
+      DEFAULT_RUN_BLOCK_FRAMES,
+    ),
+  };
+}
+
+function positiveIntegerSetting(
+  config: vscode.WorkspaceConfiguration,
+  name: string,
+  fallback: number,
+): number {
+  const value = config.get<number>(name, fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 async function startClient(context: vscode.ExtensionContext): Promise<void> {
