@@ -21,6 +21,11 @@ interface RunParamPayload {
   default: number | null;
   rangeMin: number | null;
   rangeMax: number | null;
+  scale: string | null;
+  curve: number | null;
+  unit: string | null;
+  step: number | null;
+  stepCount: number | null;
   scalar: boolean;
 }
 
@@ -768,6 +773,16 @@ function normalizeStoppedRunParams(raw: unknown): RunParamPayload[] | undefined 
           : typeof source.range_max === "number"
             ? source.range_max
             : null,
+      scale: typeof source.scale === "string" ? source.scale : null,
+      curve: typeof source.curve === "number" ? source.curve : null,
+      unit: typeof source.unit === "string" ? source.unit : null,
+      step: typeof source.step === "number" ? source.step : null,
+      stepCount:
+        typeof source.stepCount === "number"
+          ? source.stepCount
+          : typeof source.step_count === "number"
+            ? source.step_count
+            : null,
       scalar: source.scalar !== false,
     };
   });
@@ -851,6 +866,11 @@ function runParamsMatchForPreservation(
     next.default === previous.default &&
     next.rangeMin === previous.rangeMin &&
     next.rangeMax === previous.rangeMax &&
+    next.scale === previous.scale &&
+    next.curve === previous.curve &&
+    next.unit === previous.unit &&
+    next.step === previous.step &&
+    next.stepCount === previous.stepCount &&
     next.scalar === previous.scalar
   );
 }
@@ -1281,13 +1301,6 @@ function resetRunParams(): void {
       ...param,
       value: runParamDefaultValue(param),
     })),
-    events: runPanelState.events.map((event) => ({
-      ...event,
-      args: event.args.map((arg) => ({
-        ...arg,
-        value: initialEventArgValue(arg),
-      })),
-    })),
   };
   postRunPanelState();
 
@@ -1298,6 +1311,21 @@ function resetRunParams(): void {
   for (const param of runPanelState.params) {
     queueRunParamSend(param.name, param.value);
   }
+}
+
+function resetRunEventArguments(): void {
+  runPanelState = {
+    ...runPanelState,
+    error: undefined,
+    events: runPanelState.events.map((event) => ({
+      ...event,
+      args: event.args.map((arg) => ({
+        ...arg,
+        value: initialEventArgValue(arg),
+      })),
+    })),
+  };
+  postRunPanelState();
 }
 
 async function bindRunBufferFile(
@@ -1538,8 +1566,11 @@ function ensureRunPanel(): void {
       case "stop":
         await pauseRunProcessing();
         break;
-      case "reset":
+      case "resetParams":
         resetRunParams();
+        break;
+      case "resetEventArguments":
+        resetRunEventArguments();
         break;
       case "refreshDevices":
         await refreshRunDevices();
@@ -1604,7 +1635,14 @@ function postRunPanelState(): void {
   }
   void runPanel.webview.postMessage({
     type: "state",
-    state: runPanelState,
+    state: {
+      ...runPanelState,
+      supportsSourceSelection: false,
+      supportsTransport: true,
+      supportsDeviceSelection: true,
+      supportsRunSettings: false,
+      supportsScope: true,
+    },
   });
 }
 
@@ -1676,6 +1714,11 @@ function renderSharedRunHtml(webview: vscode.Webview): string {
       <p>Searched:<br/>${candidates.map((c) => `<code>${c}</code>`).join("<br/>")}</p>
     </body></html>`;
   }
+
+  const paramControlUri = webview.asWebviewUri(
+    vscode.Uri.file(path.join(path.dirname(resolvedPath), "param-control.js")),
+  );
+  html = html.replace("./param-control.js", paramControlUri.toString());
 
   // Inject the VS Code host bridge before the page script runs, and add the CSP header.
   const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${runTheme}" };</script>`;
