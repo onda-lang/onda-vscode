@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -20,6 +20,8 @@
     "onLanguage:onda",
     "onCommand:onda.restartLanguageServer",
     "onCommand:onda.runFile",
+    "onCommand:onda.createProject",
+    "onCommand:onda.saveAsProject",
     "onCommand:onda.stopFile"
   ],
   "main": "./out/extension.js",
@@ -36,6 +38,12 @@
           ".on"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "json",
+        "extensions": [
+          ".ondaproject"
+        ]
       }
     ],
     "grammars": [
@@ -85,15 +93,62 @@
     "commands": [
       {
         "command": "onda.runFile",
-        "title": "Onda: Run File"
+        "title": "Onda: Run",
+        "icon": "$(play)"
+      },
+      {
+        "command": "onda.createProject",
+        "title": "Onda: Create Project…"
+      },
+      {
+        "command": "onda.saveAsProject",
+        "title": "Onda: Save as Project…",
+        "icon": "$(save-as)"
       },
       {
         "command": "onda.stopFile",
-        "title": "Onda: Stop File"
+        "title": "Onda: Stop"
       },
       {
         "command": "onda.restartLanguageServer",
         "title": "Onda: Restart Language Server"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "onda.runFile",
+          "when": "resourceExtname == .onda || resourceExtname == .on || resourceExtname == .ondaproject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "onda.saveAsProject",
+          "when": "resourceExtname == .onda || resourceExtname == .on",
+          "group": "navigation@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "onda.runFile",
+          "when": "resourceExtname == .onda || resourceExtname == .on || resourceExtname == .ondaproject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "onda.saveAsProject",
+          "when": "resourceExtname == .onda || resourceExtname == .on",
+          "group": "navigation@2"
+        },
+        {
+          "command": "onda.createProject",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": "*.ondaproject",
+        "url": "./schemas/project.json"
       }
     ],
     "configuration": {
@@ -128,19 +183,19 @@
             "egui"
           ],
           "default": "webview",
-          "description": "Host used by Onda: Run File. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui run window."
+          "description": "Host used by Onda: Run. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui run window."
         },
         "onda.run.sampleRate": {
           "type": "integer",
           "minimum": 1,
           "default": 48000,
-          "description": "Sample rate in Hz used by Onda: Run File."
+          "description": "Sample rate in Hz used by Onda: Run."
         },
         "onda.run.blockSize": {
           "type": "integer",
           "minimum": 1,
           "default": 256,
-          "description": "Compile block size in frames used by Onda: Run File."
+          "description": "Compile block size in frames used by Onda: Run."
         }
       }
     }

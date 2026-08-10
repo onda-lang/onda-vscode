@@ -38,6 +38,9 @@ interface RunBufferPayload {
   channelsKind: "mono" | "static" | "dynamic";
   channelsStatic: number | null;
   loadedPath: string | null;
+  loadedFrames: number | null;
+  loadedChannels: number | null;
+  loadedSampleRate: number | null;
 }
 
 interface RunBufferState extends RunBufferPayload {}
@@ -109,6 +112,7 @@ let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
 let runProcessingRequested = false;
 let runOutput: vscode.OutputChannel | undefined;
+let projectOutput: vscode.OutputChannel | undefined;
 let serverOutput: vscode.OutputChannel | undefined;
 let runPanel: vscode.WebviewPanel | undefined;
 let runPanelReady = false;
@@ -126,7 +130,6 @@ const SCOPE_POLL_INTERVAL_MS = 50;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
 const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
 const DEFAULT_RUN_BLOCK_FRAMES = 256;
-const UNBOUND_BUFFERS_MESSAGE = "Bind all buffers to start processing";
 const preservedRunBufferPaths = new Map<string, string>();
 let runPanelState: RunPanelState = {
   running: false,
@@ -147,8 +150,9 @@ let runPanelState: RunPanelState = {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
   runOutput = vscode.window.createOutputChannel("Onda Run");
+  projectOutput = vscode.window.createOutputChannel("Onda Projects");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
-  context.subscriptions.push(runOutput, serverOutput);
+  context.subscriptions.push(runOutput, projectOutput, serverOutput);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.restartLanguageServer", async () => {
@@ -156,8 +160,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
   context.subscriptions.push(
-    vscode.commands.registerCommand("onda.runFile", async () => {
-      await runFile();
+    vscode.commands.registerCommand("onda.runFile", async (resource?: vscode.Uri) => {
+      await runFile(resource);
+    }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("onda.createProject", async (resource?: vscode.Uri) => {
+      await createProject(resource);
+    }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("onda.saveAsProject", async (resource?: vscode.Uri) => {
+      await saveAsProject(resource);
     }),
   );
   context.subscriptions.push(
@@ -200,8 +214,11 @@ async function restartClient(): Promise<void> {
   await startClient(extensionContext);
 }
 
-async function runFile(preferredPath?: string, options?: { restart?: boolean }): Promise<void> {
-  const fsPath = await resolveRunPath(preferredPath);
+async function runFile(
+  preferredInput?: string | vscode.Uri,
+  options?: { restart?: boolean },
+): Promise<void> {
+  const fsPath = await resolveRunPath(preferredInput);
   if (!fsPath) {
     return;
   }
@@ -374,7 +391,7 @@ async function setRunProcessing(playing: boolean): Promise<void> {
     runProcessingRequested = playing;
     runPanelState = {
       ...runPanelState,
-      ...runBufferProcessingState(runPanelState.buffers),
+      ...runProcessingState(),
       error: undefined,
     };
     if (runPanelState.running) {
@@ -402,7 +419,7 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
     runPanelState = {
       ...runPanelState,
       connected: false,
-      ...runBufferProcessingState(runPanelState.buffers),
+      ...runProcessingState(),
     };
     postRunPanelState();
     return;
@@ -418,7 +435,7 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
     ...runPanelState,
     connected: false,
     path: options?.preservePath ?? runningPath,
-    ...runBufferProcessingState(runPanelState.buffers),
+    ...runProcessingState(),
     error: undefined,
   };
   postRunPanelState();
@@ -523,38 +540,51 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
   await refreshStoppedRunMetadata(document.uri.fsPath);
 }
 
-async function resolveRunPath(preferredPath?: string): Promise<string | undefined> {
-  if (preferredPath) {
-    return preferredPath;
-  }
-  const document = await currentRunDocument();
-  if (!document) {
+async function resolveRunPath(
+  preferredInput?: string | vscode.Uri,
+): Promise<string | undefined> {
+  const uri = typeof preferredInput === "string"
+    ? vscode.Uri.file(preferredInput)
+    : preferredInput ?? vscode.window.activeTextEditor?.document.uri;
+  if (!uri || !isOndaRunInput(uri)) {
+    void vscode.window.showErrorMessage("Open an Onda source or .ondaproject file to run.");
     return undefined;
   }
-
-  if (document.isDirty) {
-    const saved = await document.save();
-    if (!saved) {
-      void vscode.window.showErrorMessage("Onda run must be saved before playback starts.");
-      return undefined;
-    }
+  if (uri.scheme !== "file") {
+    void vscode.window.showErrorMessage("Onda playback requires an input saved on disk.");
+    return undefined;
   }
-
-  return document.uri.fsPath;
+  if (!await saveOpenDocument(uri, "Onda input must be saved before playback starts.")) {
+    return undefined;
+  }
+  return uri.fsPath;
 }
 
-async function currentRunDocument(): Promise<vscode.TextDocument | undefined> {
-  const editor = vscode.window.activeTextEditor;
-  const document = editor?.document;
-  if (!document || document.languageId !== "onda") {
-    void vscode.window.showErrorMessage("Open an Onda file to run a run.");
-    return undefined;
+function isOndaRunInput(uri: vscode.Uri): boolean {
+  return isOndaSourcePath(uri.fsPath) || isOndaProjectPath(uri.fsPath);
+}
+
+function isOndaSourcePath(fsPath: string): boolean {
+  const extension = path.extname(fsPath).toLowerCase();
+  return extension === ".onda" || extension === ".on";
+}
+
+function isOndaProjectPath(fsPath: string): boolean {
+  return path.extname(fsPath).toLowerCase() === ".ondaproject";
+}
+
+async function saveOpenDocument(uri: vscode.Uri, failureMessage: string): Promise<boolean> {
+  const document = vscode.workspace.textDocuments.find((candidate) =>
+    candidate.uri.scheme === "file" && path.resolve(candidate.uri.fsPath) === path.resolve(uri.fsPath)
+  );
+  if (!document?.isDirty) {
+    return true;
   }
-  if (document.uri.scheme !== "file") {
-    void vscode.window.showErrorMessage("Onda run playback currently requires a saved file on disk.");
-    return undefined;
+  if (await document.save()) {
+    return true;
   }
-  return document;
+  void vscode.window.showErrorMessage(failureMessage);
+  return false;
 }
 
 function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
@@ -568,6 +598,267 @@ function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
 
 function shellQuote(value: string): string {
   return /\s/.test(value) ? JSON.stringify(value) : value;
+}
+
+async function createProject(resource?: vscode.Uri): Promise<void> {
+  const activeSource = activeOndaSourceUri();
+  let source: vscode.Uri | undefined;
+  if (activeSource) {
+    const choice = await vscode.window.showQuickPick(
+      [
+        {
+          label: "From active source",
+          description: path.basename(activeSource.fsPath),
+          source: activeSource,
+        },
+        {
+          label: "Empty project",
+          description: "Create code/main.onda and an assets directory",
+          source: undefined,
+        },
+      ],
+      {
+        title: "Create Onda Project",
+        placeHolder: "Choose how to initialize the project",
+      },
+    );
+    if (!choice) {
+      return;
+    }
+    source = choice.source;
+  }
+
+  if (
+    source
+    && !await saveOpenDocument(source, "Save the active source before creating a project.")
+  ) {
+    return;
+  }
+  const defaultName = source
+    ? path.basename(source.fsPath, path.extname(source.fsPath))
+    : "onda-project";
+  const destination = await chooseProjectDestination(resource ?? source, defaultName, "Create");
+  if (!destination) {
+    return;
+  }
+
+  const args = ["project", destination.fsPath];
+  if (source) {
+    args.push("--from", source.fsPath);
+  }
+  if (!await executeProjectCommand(
+    args,
+    path.dirname(destination.fsPath),
+    "Creating Onda project…",
+  )) {
+    return;
+  }
+  await offerToOpenProject(destination, "Created");
+}
+
+async function saveAsProject(resource?: vscode.Uri): Promise<void> {
+  const source = projectSourceUri(resource);
+  if (!source) {
+    void vscode.window.showErrorMessage(
+      "Open an Onda source file, or start a source in Onda Run, before saving it as a project.",
+    );
+    return;
+  }
+  if (!await saveOpenDocument(
+    source,
+    "Save the Onda source before exporting a project.",
+  )) {
+    return;
+  }
+
+  const defaultName = `${path.basename(source.fsPath, path.extname(source.fsPath))}-project`;
+  const destination = await chooseProjectDestination(source, defaultName, "Save");
+  if (!destination) {
+    return;
+  }
+
+  const args = ["project", destination.fsPath, "--from", source.fsPath];
+  if (samePath(runPanelState.path, source.fsPath)) {
+    for (const buffer of runPanelState.buffers) {
+      if (buffer.loadedPath) {
+        args.push("--buffer", `${buffer.name}=${buffer.loadedPath}`);
+      }
+    }
+  }
+  if (!await executeProjectCommand(
+    args,
+    path.dirname(destination.fsPath),
+    "Saving Onda project…",
+  )) {
+    return;
+  }
+  await offerToOpenProject(destination, "Saved");
+}
+
+function activeOndaSourceUri(): vscode.Uri | undefined {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  return uri?.scheme === "file" && isOndaSourcePath(uri.fsPath) ? uri : undefined;
+}
+
+function projectSourceUri(resource?: vscode.Uri): vscode.Uri | undefined {
+  if (resource?.scheme === "file" && isOndaSourcePath(resource.fsPath)) {
+    return resource;
+  }
+  const active = activeOndaSourceUri();
+  if (active) {
+    return active;
+  }
+  return runPanelState.path && isOndaSourcePath(runPanelState.path)
+    ? vscode.Uri.file(runPanelState.path)
+    : undefined;
+}
+
+async function chooseProjectDestination(
+  context: vscode.Uri | undefined,
+  defaultName: string,
+  action: "Create" | "Save",
+): Promise<vscode.Uri | undefined> {
+  const parent = await vscode.window.showOpenDialog({
+    title: `${action} Onda Project: Select Parent Folder`,
+    defaultUri: defaultProjectParent(context),
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: "Select Parent Folder",
+  });
+  if (!parent?.[0]) {
+    return undefined;
+  }
+  const name = await vscode.window.showInputBox({
+    title: `${action} Onda Project`,
+    prompt: "Project folder name",
+    value: defaultName,
+    valueSelection: [0, defaultName.length],
+    validateInput: validateProjectName,
+  });
+  return name === undefined
+    ? undefined
+    : vscode.Uri.joinPath(parent[0], name.normalize("NFC"));
+}
+
+function defaultProjectParent(context?: vscode.Uri): vscode.Uri | undefined {
+  if (context?.scheme === "file") {
+    try {
+      if (fs.statSync(context.fsPath).isDirectory()) {
+        return context;
+      }
+    } catch {
+      // Fall back to the containing directory for a not-yet-created path.
+    }
+    return vscode.Uri.file(path.dirname(context.fsPath));
+  }
+  return vscode.workspace.workspaceFolders?.[0]?.uri;
+}
+
+function validateProjectName(value: string): string | undefined {
+  const name = value.normalize("NFC");
+  if (name.length === 0) {
+    return "Enter a project name.";
+  }
+  if (Buffer.byteLength(name, "utf8") > 255) {
+    return "The project name must be at most 255 UTF-8 bytes.";
+  }
+  if (
+    /[<>:"|?*\\/\u0000-\u001f]/.test(name)
+    || name === "."
+    || name === ".."
+  ) {
+    return "Use a single portable folder name without slashes or control characters.";
+  }
+  if (/[. ]$/.test(name)) {
+    return "The project name cannot end with a dot or space.";
+  }
+  const stem = name.split(".", 1)[0].toUpperCase();
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) {
+    return "That project name is reserved on Windows.";
+  }
+  return undefined;
+}
+
+function samePath(left: string | undefined, right: string): boolean {
+  return left !== undefined && path.resolve(left) === path.resolve(right);
+}
+
+async function executeProjectCommand(
+  commandArgs: string[],
+  cwd: string,
+  title: string,
+): Promise<boolean> {
+  const { command, extraArgs } = ondaExecutableConfig();
+  const args = [...extraArgs, ...commandArgs];
+  projectOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title },
+      () => spawnProjectCommand(command, args, cwd),
+    );
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    projectOutput?.show(true);
+    void vscode.window.showErrorMessage(`Onda project command failed: ${message}`);
+    return false;
+  }
+}
+
+function spawnProjectCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = childProcess.spawn(command, args, {
+      cwd,
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => projectOutput?.append(chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      projectOutput?.append(text);
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(
+        trimRunErrorText(stderr) ?? (signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`),
+      ));
+    });
+  });
+}
+
+async function offerToOpenProject(destination: vscode.Uri, verb: string): Promise<void> {
+  const choice = await vscode.window.showInformationMessage(
+    `${verb} Onda project '${path.basename(destination.fsPath)}'.`,
+    "Open Project File",
+    "Open Folder",
+  );
+  if (choice === "Open Folder") {
+    await vscode.commands.executeCommand("vscode.openFolder", destination, true);
+    return;
+  }
+  if (choice === "Open Project File") {
+    const document = await vscode.workspace.openTextDocument(projectManifestUri(destination));
+    await vscode.window.showTextDocument(document);
+  }
+}
+
+function projectManifestUri(destination: vscode.Uri): vscode.Uri {
+  const destinationName = path.basename(destination.fsPath);
+  const manifestName = isOndaProjectPath(destinationName)
+    ? destinationName
+    : `${destinationName}.ondaproject`;
+  return vscode.Uri.joinPath(destination, manifestName);
 }
 
 function trimRunErrorText(text: string, maxChars = 4000): string | undefined {
@@ -810,7 +1101,7 @@ function handleRunStdoutLine(line: string): void {
     if (payload.event === "ready") {
       const buffers = payload.buffers ?? [];
       runPanelState = {
-        ...runBufferProcessingState(buffers),
+        ...runProcessingState(),
         connected: false,
         path: runPath,
         error: undefined,
@@ -875,12 +1166,7 @@ function runParamsMatchForPreservation(
   );
 }
 
-function runBufferProcessingState(
-  buffers: RunBufferState[],
-): Pick<RunPanelState, "running" | "status"> {
-  if (buffers.some((buffer) => !buffer.loadedPath)) {
-    return { running: false, status: UNBOUND_BUFFERS_MESSAGE };
-  }
+function runProcessingState(): Pick<RunPanelState, "running" | "status"> {
   const running = runProcess !== undefined && runProcessingRequested;
   return { running, status: running ? "Running" : "Stopped" };
 }
@@ -918,7 +1204,7 @@ function connectRunControl(port: number): void {
     runPanelState = {
       ...runPanelState,
       connected: true,
-      ...runBufferProcessingState(runPanelState.buffers),
+      ...runProcessingState(),
       error: undefined,
     };
     postRunPanelState();
@@ -1038,7 +1324,7 @@ async function refreshRunBuffers(): Promise<void> {
     runPanelState = {
       ...runPanelState,
       buffers: result.buffers,
-      ...runBufferProcessingState(result.buffers),
+      ...runProcessingState(),
     };
     if (runPanelState.running && runPanelState.connected) {
       startScopePolling();
@@ -1336,24 +1622,11 @@ async function bindRunBufferFile(
   try {
     await sendRunControlRequest("bindBufferWav", { name, path: filePath });
     preservedRunBufferPaths.set(name, filePath);
-    const buffers = runPanelState.buffers.map((buffer) =>
-      buffer.name === name
-        ? {
-            ...buffer,
-            loadedPath: filePath,
-          }
-        : buffer,
-    );
     runPanelState = {
       ...runPanelState,
       error: undefined,
-      buffers,
-      ...runBufferProcessingState(buffers),
     };
-    if (runPanelState.running && runPanelState.connected) {
-      startScopePolling();
-    }
-    postRunPanelState();
+    await refreshRunBuffers();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
@@ -1371,22 +1644,11 @@ async function clearRunBuffer(name: string): Promise<void> {
   try {
     await sendRunControlRequest("clearBuffer", { name });
     preservedRunBufferPaths.delete(name);
-    const buffers = runPanelState.buffers.map((buffer) =>
-      buffer.name === name
-        ? {
-            ...buffer,
-            loadedPath: null,
-          }
-        : buffer,
-    );
     runPanelState = {
       ...runPanelState,
       error: undefined,
-      buffers,
-      ...runBufferProcessingState(buffers),
     };
-    stopScopePolling();
-    postRunPanelState();
+    await refreshRunBuffers();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
@@ -1402,7 +1664,7 @@ async function chooseRunBufferFile(name: string): Promise<void> {
     canSelectMany: false,
     openLabel: `Bind '${name}' buffer`,
     filters: {
-      "Wave Audio": ["wav"],
+      "Onda buffer assets": ["wav", "ondabuffer"],
     },
   });
   const filePath = picked?.[0]?.fsPath;
@@ -1606,6 +1868,11 @@ function ensureRunPanel(): void {
           await clearRunBuffer(payload.name);
         }
         break;
+      case "saveProjectAs":
+        await saveAsProject(
+          runPanelState.path ? vscode.Uri.file(runPanelState.path) : undefined,
+        );
+        break;
       default:
         break;
     }
@@ -1638,6 +1905,12 @@ function postRunPanelState(): void {
     state: {
       ...runPanelState,
       supportsSourceSelection: false,
+      supportsProjectExport: Boolean(
+        runPanelState.path && isOndaSourcePath(runPanelState.path),
+      ),
+      canExportProject: Boolean(
+        runPanelState.path && isOndaSourcePath(runPanelState.path),
+      ),
       supportsTransport: true,
       supportsDeviceSelection: true,
       supportsRunSettings: false,
