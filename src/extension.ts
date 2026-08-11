@@ -9,6 +9,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { normalizeRunParams } from "./runMetadata";
 
 type RunScalarValue = boolean | number | null;
 type RunEventValue = RunScalarValue | RunEventValue[];
@@ -73,7 +74,7 @@ interface RunReadyEvent {
   event: "ready";
   path: string;
   port: number;
-  params: RunParamPayload[];
+  params: unknown;
   buffers: RunBufferPayload[];
   events: RunEventPayload[];
   outputChannels: number;
@@ -1033,50 +1034,7 @@ async function loadStoppedRunMetadata(
 }
 
 function normalizeStoppedRunParams(raw: unknown): RunParamPayload[] | undefined {
-  if (!Array.isArray(raw)) {
-    return undefined;
-  }
-  return raw.map((param) => {
-    const source = (param ?? {}) as Record<string, unknown>;
-    return {
-      index: typeof source.index === "number" ? source.index : 0,
-      name: typeof source.name === "string" ? source.name : "",
-      type:
-        typeof source.type === "string"
-          ? source.type
-          : typeof source.type_repr === "string"
-            ? source.type_repr
-            : "f32",
-      value:
-        typeof source.value === "boolean" || typeof source.value === "number" || source.value === null
-          ? source.value as RunScalarValue
-          : null,
-      default: typeof source.default === "number" ? source.default : null,
-      rangeMin:
-        typeof source.rangeMin === "number"
-          ? source.rangeMin
-          : typeof source.range_min === "number"
-            ? source.range_min
-            : null,
-      rangeMax:
-        typeof source.rangeMax === "number"
-          ? source.rangeMax
-          : typeof source.range_max === "number"
-            ? source.range_max
-            : null,
-      scale: typeof source.scale === "string" ? source.scale : null,
-      curve: typeof source.curve === "number" ? source.curve : null,
-      unit: typeof source.unit === "string" ? source.unit : null,
-      step: typeof source.step === "number" ? source.step : null,
-      stepCount:
-        typeof source.stepCount === "number"
-          ? source.stepCount
-          : typeof source.step_count === "number"
-            ? source.step_count
-            : null,
-      scalar: source.scalar !== false,
-    };
-  });
+  return normalizeRunParams(raw);
 }
 
 function handleRunStdout(chunk: string): void {
@@ -1100,6 +1058,7 @@ function handleRunStdoutLine(line: string): void {
     const payload = JSON.parse(line) as RunReadyEvent;
     if (payload.event === "ready") {
       const buffers = payload.buffers ?? [];
+      const params = normalizeRunParams(payload.params) ?? [];
       runPanelState = {
         ...runProcessingState(),
         connected: false,
@@ -1108,7 +1067,7 @@ function handleRunStdoutLine(line: string): void {
         outputChannels: payload.outputChannels ?? 0,
         buffers,
         events: mergeRunEvents(payload.events ?? [], runPanelState.events),
-        params: mergeRunParams(payload.params, runPanelState.params),
+        params: mergeRunParams(params, runPanelState.params),
         inputDevices: payload.inputDevices ?? [],
         outputDevices: payload.outputDevices ?? [],
         currentInputDevice: payload.currentInputDevice ?? null,
@@ -1296,13 +1255,14 @@ function rejectPendingRunRequests(error: Error): void {
 
 async function refreshRunParams(): Promise<void> {
   try {
-    const result = await sendRunControlRequest<{ params: RunParamPayload[] }>("getParams");
-    if (!result || !Array.isArray(result.params)) {
+    const result = await sendRunControlRequest<{ params: unknown }>("getParams");
+    const params = normalizeRunParams(result?.params);
+    if (!params) {
       return;
     }
     runPanelState = {
       ...runPanelState,
-      params: mergeRunParams(result.params, runPanelState.params),
+      params: mergeRunParams(params, runPanelState.params),
     };
     postRunPanelState();
   } catch (error) {
