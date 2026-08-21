@@ -9,7 +9,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { normalizeRunParams } from "./runMetadata";
+import { initialRunParamValue, normalizeRunParams } from "./runMetadata";
 
 type RunScalarValue = boolean | number | null;
 type RunEventValue = RunScalarValue | RunEventValue[];
@@ -1101,7 +1101,7 @@ function mergeRunParams(
         value:
           previous && runParamsMatchForPreservation(param, previous)
             ? previous.value
-            : initialParamValue(param),
+            : initialRunParamValue(param),
       };
     });
 }
@@ -1361,28 +1361,6 @@ function updateRunParamState(
     }),
   };
   return nextParam;
-}
-
-function initialParamValue(param: Pick<RunParamPayload, "type" | "value" | "default" | "rangeMin">): RunScalarValue {
-  if (param.type === "bool") {
-    if (param.value !== null && param.value !== undefined) {
-      return param.value !== 0;
-    }
-    if (param.default !== null && param.default !== undefined) {
-      return param.default !== 0;
-    }
-    return false;
-  }
-  if (param.value !== null && param.value !== undefined) {
-    return param.value;
-  }
-  if (param.default !== null && param.default !== undefined) {
-    return param.default;
-  }
-  if (param.rangeMin !== null && param.rangeMin !== undefined) {
-    return param.rangeMin;
-  }
-  return 0;
 }
 
 function declaredParamDefaultValue(

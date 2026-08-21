@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { normalizeRunParams } = require("../out/runMetadata.js");
+const { initialRunParamValue, normalizeRunParams } = require("../out/runMetadata.js");
 
 test("decodes current lossless run parameter metadata", () => {
   const [param] = normalizeRunParams([{
@@ -67,4 +67,15 @@ test("decodes boolean representations without treating missing values as false",
   assert.equal(enabled.value, true);
   assert.equal(enabled.default, 0);
   assert.equal(missing.value, null);
+});
+
+test("initializes an explicitly false boolean parameter as false", () => {
+  const [liveInput] = normalizeRunParams([{
+    name: "live_input",
+    type: "bool",
+    valueRepr: "false",
+    defaultRepr: "false",
+  }]);
+
+  assert.equal(initialRunParamValue(liveInput), false);
 });

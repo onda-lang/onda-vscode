@@ -23,6 +23,29 @@ export function normalizeRunParams(raw: unknown): NormalizedRunParamPayload[] | 
   return raw.map(normalizeRunParam);
 }
 
+export function initialRunParamValue(
+  param: Pick<NormalizedRunParamPayload, "type" | "value" | "default" | "rangeMin">,
+): RunScalarValue {
+  if (param.value !== null && param.value !== undefined) {
+    if (param.type === "bool") {
+      return typeof param.value === "boolean" ? param.value : param.value !== 0;
+    }
+    return param.value;
+  }
+  if (param.type === "bool") {
+    return param.default !== null && param.default !== undefined
+      ? param.default !== 0
+      : false;
+  }
+  if (param.default !== null && param.default !== undefined) {
+    return param.default;
+  }
+  if (param.rangeMin !== null && param.rangeMin !== undefined) {
+    return param.rangeMin;
+  }
+  return 0;
+}
+
 function normalizeRunParam(raw: unknown): NormalizedRunParamPayload {
   const source = isRecord(raw) ? raw : {};
   const type = stringField(source, ["type", "type_repr"]) ?? "f32";
