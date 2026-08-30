@@ -15,7 +15,7 @@ This extension adds VSCode support for Onda:
 ## Requirements
 
 - VSCode 1.90 or newer
-- Onda 0.7.0 or newer
+- Onda 0.8.0 or newer
 - an `onda` executable available on `PATH`, or an explicit configured path
 
 ## Install

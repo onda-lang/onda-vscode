@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VSCode support for the Onda audio DSL",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "onda-lang",
   "icon": "assets/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -63,6 +63,11 @@
         "id": "state",
         "superType": "variable",
         "description": "Onda init-declared state symbol"
+      },
+      {
+        "id": "delegate",
+        "superType": "event",
+        "description": "Onda output event declaration or call"
       }
     ],
     "semanticTokenScopes": [
@@ -85,6 +90,12 @@
             "variable.parameter"
           ],
           "function": [
+            "entity.name.function"
+          ],
+          "event": [
+            "entity.name.function"
+          ],
+          "delegate": [
             "entity.name.function"
           ]
         }

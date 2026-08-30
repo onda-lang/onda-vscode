@@ -58,7 +58,7 @@
       "patterns": [
         {
           "name": "meta.section.header.onda",
-          "match": "^(\\s*)(ins|inputs|outs|outputs|kouts|params|kins|const|events|buffers|init|block|sample|graph)\\b(?=\\s*(?:<|\\d|[:{(A-Za-z_]))(\\s*<[^>\\n]+>)?(\\s+\\d+)?(\\s*(?::|\\{))?",
+          "match": "^(\\s*)(ins|inputs|outs|outputs|kouts|params|kins|const|events|delegates|tasks|buffers|init|block|sample|graph)\\b(?=\\s*(?:<|\\d|[:{(A-Za-z_]))(\\s*<[^>\\n]+>)?(\\s+\\d+)?(\\s*(?::|\\{))?",
           "captures": {
             "2": {
               "name": "storage.type.block.onda"
@@ -98,7 +98,7 @@
         },
         {
           "name": "meta.declaration.function.onda",
-          "match": "^(\\s*)(def|event)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "^(\\s*)(def|event|delegate|task)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "2": {
               "name": "storage.type.block.onda"
@@ -175,7 +175,7 @@
       "patterns": [
         {
           "name": "keyword.control.onda",
-          "match": "\\b(if|elif|else|for|in|while|loop|break|continue|return|assert|import|include|use|as|pub|pin)\\b"
+          "match": "\\b(if|elif|else|for|in|while|loop|break|continue|return|await|yield|assert|import|include|use|as|pub|private|pin|config|when|print)\\b"
         },
         {
           "name": "constant.language.onda",

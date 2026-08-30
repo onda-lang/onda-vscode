@@ -10,6 +10,13 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 import { initialRunParamValue, normalizeRunParams } from "./runMetadata";
+import {
+  applyRunOutputNotification,
+  clearRunLogState,
+  initialRunLogState,
+  RunDelegateMetadata,
+  RunLogState,
+} from "./runLog";
 
 type RunScalarValue = boolean | number | null;
 type RunEventValue = RunScalarValue | RunEventValue[];
@@ -42,6 +49,12 @@ interface RunBufferPayload {
   loadedFrames: number | null;
   loadedChannels: number | null;
   loadedSampleRate: number | null;
+  waveform?: {
+    minValue: number;
+    maxValue: number;
+    minimums: number[];
+    maximums: number[];
+  } | null;
 }
 
 interface RunBufferState extends RunBufferPayload {}
@@ -77,6 +90,7 @@ interface RunReadyEvent {
   params: unknown;
   buffers: RunBufferPayload[];
   events: RunEventPayload[];
+  delegates: RunDelegateMetadata[];
   outputChannels: number;
   inputDevices: string[];
   outputDevices: string[];
@@ -84,7 +98,7 @@ interface RunReadyEvent {
   currentOutputDevice: string | null;
 }
 
-interface RunPanelState {
+interface RunPanelState extends RunLogState {
   running: boolean;
   connected: boolean;
   path?: string;
@@ -93,6 +107,7 @@ interface RunPanelState {
   outputChannels: number;
   buffers: RunBufferState[];
   events: RunEventState[];
+  delegates: RunDelegateMetadata[];
   params: RunParamState[];
   inputDevices: string[];
   outputDevices: string[];
@@ -133,12 +148,14 @@ const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
 const DEFAULT_RUN_BLOCK_FRAMES = 256;
 const preservedRunBufferPaths = new Map<string, string>();
 let runPanelState: RunPanelState = {
+  ...initialRunLogState(),
   running: false,
   connected: false,
   status: "Stopped",
   outputChannels: 0,
   buffers: [],
   events: [],
+  delegates: [],
   params: [],
   inputDevices: [],
   outputDevices: [],
@@ -254,6 +271,7 @@ async function runFile(
   const preservedEvents =
     preserveRunState ? runPanelState.events : [];
   runPanelState = {
+    ...initialRunLogState(),
     running: false,
     connected: false,
     path: fsPath,
@@ -262,6 +280,7 @@ async function runFile(
     outputChannels: preserveRunState ? runPanelState.outputChannels : 0,
     buffers: preserveRunState ? runPanelState.buffers : [],
     events: preservedEvents,
+    delegates: [],
     params: preservedParams,
     inputDevices: runPanelState.inputDevices,
     outputDevices: runPanelState.outputDevices,
@@ -1060,6 +1079,7 @@ function handleRunStdoutLine(line: string): void {
       const buffers = payload.buffers ?? [];
       const params = normalizeRunParams(payload.params) ?? [];
       runPanelState = {
+        ...runPanelState,
         ...runProcessingState(),
         connected: false,
         path: runPath,
@@ -1067,6 +1087,7 @@ function handleRunStdoutLine(line: string): void {
         outputChannels: payload.outputChannels ?? 0,
         buffers,
         events: mergeRunEvents(payload.events ?? [], runPanelState.events),
+        delegates: payload.delegates ?? [],
         params: mergeRunParams(params, runPanelState.params),
         inputDevices: payload.inputDevices ?? [],
         outputDevices: payload.outputDevices ?? [],
@@ -1167,6 +1188,7 @@ function connectRunControl(port: number): void {
       error: undefined,
     };
     postRunPanelState();
+    sendRunControlNotification("subscribeDelegates");
     void Promise.all([
       refreshRunParams(),
       refreshRunBuffers(),
@@ -1230,7 +1252,25 @@ function closeRunControlSocket(): void {
 }
 
 function handleRunControlLine(line: string): void {
-  const payload = JSON.parse(line) as { id?: number; ok?: boolean; result?: unknown; error?: string };
+  const payload = JSON.parse(line) as {
+    id?: number;
+    ok?: boolean;
+    result?: unknown;
+    error?: string;
+  };
+  const logState = applyRunOutputNotification(
+    runPanelState,
+    payload,
+    runPanelState.delegates,
+  );
+  if (logState) {
+    runPanelState = {
+      ...runPanelState,
+      ...logState,
+    };
+    postRunPanelState();
+    return;
+  }
   if (typeof payload.id !== "number") {
     return;
   }
@@ -1617,8 +1657,10 @@ function clearRunPanelMemory(): void {
   preservedRunBufferPaths.clear();
   runPanelState = {
     ...runPanelState,
+    ...initialRunLogState(),
     buffers: [],
     events: [],
+    delegates: [],
     params: [],
     inputDevices: [],
     outputDevices: [],
@@ -1771,6 +1813,13 @@ function ensureRunPanel(): void {
         break;
       case "resetEventArguments":
         resetRunEventArguments();
+        break;
+      case "clearLog":
+        runPanelState = {
+          ...runPanelState,
+          ...clearRunLogState(runPanelState),
+        };
+        postRunPanelState();
         break;
       case "refreshDevices":
         await refreshRunDevices();
