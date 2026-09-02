@@ -17,9 +17,20 @@ import {
   RunDelegateMetadata,
   RunLogState,
 } from "./runLog";
+import {
+  RunProcessConfiguration,
+  sameRunProcessConfiguration,
+} from "./runConfiguration";
+import {
+  COMPUTER_KEYBOARD_MIDI_INPUT,
+  NO_MIDI_CAPABILITIES,
+  normalizeMidiInputDevices,
+  RunMidiCapabilities,
+  runMidiNoteEvent,
+} from "./runMidi";
 
 type RunScalarValue = boolean | number | null;
-type RunEventValue = RunScalarValue | RunEventValue[];
+type RunEventValue = boolean | number | string | null | RunEventValue[];
 
 interface RunParamPayload {
   index: number;
@@ -91,11 +102,14 @@ interface RunReadyEvent {
   buffers: RunBufferPayload[];
   events: RunEventPayload[];
   delegates: RunDelegateMetadata[];
+  midi?: Partial<RunMidiCapabilities>;
   outputChannels: number;
   inputDevices: string[];
   outputDevices: string[];
+  midiInputDevices?: string[];
   currentInputDevice: string | null;
   currentOutputDevice: string | null;
+  currentMidiInputDevice?: string | null;
 }
 
 interface RunPanelState extends RunLogState {
@@ -109,10 +123,13 @@ interface RunPanelState extends RunLogState {
   events: RunEventState[];
   delegates: RunDelegateMetadata[];
   params: RunParamState[];
+  midi: RunMidiCapabilities;
   inputDevices: string[];
   outputDevices: string[];
+  midiInputDevices: string[];
   currentInputDevice: string | null;
   currentOutputDevice: string | null;
+  currentMidiInputDevice: string | null;
   sampleRateHz: number;
   blockFrames: number;
 }
@@ -126,6 +143,7 @@ let client: LanguageClient | undefined;
 let extensionContext: vscode.ExtensionContext | undefined;
 let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
+let activeRunConfiguration: RunProcessConfiguration | undefined;
 let runProcessingRequested = false;
 let runOutput: vscode.OutputChannel | undefined;
 let projectOutput: vscode.OutputChannel | undefined;
@@ -157,10 +175,13 @@ let runPanelState: RunPanelState = {
   events: [],
   delegates: [],
   params: [],
+  midi: NO_MIDI_CAPABILITIES,
   inputDevices: [],
   outputDevices: [],
+  midiInputDevices: [],
   currentInputDevice: null,
   currentOutputDevice: null,
+  currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
   sampleRateHz: DEFAULT_RUN_SAMPLE_RATE_HZ,
   blockFrames: DEFAULT_RUN_BLOCK_FRAMES,
 };
@@ -247,16 +268,25 @@ async function runFile(
   const runHost = ondaRunHostSetting();
   const runTheme = ondaRunThemeSetting();
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
-  const runSettingsChanged =
-    runPanelState.sampleRateHz !== sampleRateHz ||
-    runPanelState.blockFrames !== blockFrames;
+  const desiredRunConfiguration: RunProcessConfiguration = {
+    sampleRateHz,
+    blockFrames,
+    inputDevice: runPanelState.currentInputDevice,
+    outputDevice: runPanelState.currentOutputDevice,
+    midiInputDevice: runPanelState.currentMidiInputDevice,
+  };
 
   if (runHost === "webview") {
     ensureRunPanel();
   } else if (runPanel) {
     runPanel.dispose();
   }
-  if (runProcess && runPath === fsPath && !options?.restart && !runSettingsChanged) {
+  if (
+    runProcess &&
+    runPath === fsPath &&
+    !options?.restart &&
+    sameRunProcessConfiguration(activeRunConfiguration, desiredRunConfiguration)
+  ) {
     if (runHost === "webview") {
       revealRunPanel();
       if (runPanelState.connected && !runProcessingRequested) {
@@ -282,10 +312,15 @@ async function runFile(
     events: preservedEvents,
     delegates: [],
     params: preservedParams,
+    midi: preserveRunState
+      ? runPanelState.midi
+      : NO_MIDI_CAPABILITIES,
     inputDevices: runPanelState.inputDevices,
     outputDevices: runPanelState.outputDevices,
+    midiInputDevices: runPanelState.midiInputDevices,
     currentInputDevice: runPanelState.currentInputDevice,
     currentOutputDevice: runPanelState.currentOutputDevice,
+    currentMidiInputDevice: runPanelState.currentMidiInputDevice,
     sampleRateHz,
     blockFrames,
   };
@@ -311,6 +346,12 @@ async function runFile(
   if (runPanelState.currentOutputDevice) {
     args.push("--output-device", runPanelState.currentOutputDevice);
   }
+  if (
+    runPanelState.currentMidiInputDevice &&
+    runPanelState.currentMidiInputDevice !== COMPUTER_KEYBOARD_MIDI_INPUT
+  ) {
+    args.push("--midi-input-device", runPanelState.currentMidiInputDevice);
+  }
   const cwd = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
   const child = childProcess.spawn(command, args, {
     cwd,
@@ -320,6 +361,7 @@ async function runFile(
 
   runProcess = child;
   runPath = fsPath;
+  activeRunConfiguration = desiredRunConfiguration;
   runStdoutBuffer = "";
   let runStderrBuffer = "";
 
@@ -468,6 +510,7 @@ async function stopFile(options?: { silent?: boolean; preservePath?: string }): 
 function clearRunRuntimeState(options?: { preservePath?: string }): void {
   runProcess = undefined;
   runPath = options?.preservePath;
+  activeRunConfiguration = undefined;
   runProcessingRequested = false;
   runStdoutBuffer = "";
   closeRunControlSocket();
@@ -1089,10 +1132,21 @@ function handleRunStdoutLine(line: string): void {
         events: mergeRunEvents(payload.events ?? [], runPanelState.events),
         delegates: payload.delegates ?? [],
         params: mergeRunParams(params, runPanelState.params),
+        midi: {
+          available: payload.midi?.available === true,
+          noteOn: payload.midi?.noteOn === true,
+          noteOff: payload.midi?.noteOff === true,
+        },
         inputDevices: payload.inputDevices ?? [],
         outputDevices: payload.outputDevices ?? [],
+        midiInputDevices: normalizeMidiInputDevices(payload.midiInputDevices),
         currentInputDevice: payload.currentInputDevice ?? null,
         currentOutputDevice: payload.currentOutputDevice ?? null,
+        currentMidiInputDevice:
+          payload.currentMidiInputDevice ??
+          (runPanelState.currentMidiInputDevice === COMPUTER_KEYBOARD_MIDI_INPUT
+            ? COMPUTER_KEYBOARD_MIDI_INPUT
+            : null),
         sampleRateHz: runPanelState.sampleRateHz,
         blockFrames: runPanelState.blockFrames,
       };
@@ -1662,10 +1716,13 @@ function clearRunPanelMemory(): void {
     events: [],
     delegates: [],
     params: [],
+    midi: NO_MIDI_CAPABILITIES,
     inputDevices: [],
     outputDevices: [],
+    midiInputDevices: [],
     currentInputDevice: null,
     currentOutputDevice: null,
+    currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
   };
 }
 
@@ -1678,7 +1735,7 @@ function normalizeDeviceSelection(name: string | null | undefined): string | nul
 }
 
 async function updateRunDeviceSelection(
-  kind: "input" | "output",
+  kind: "input" | "output" | "midi",
   name: string | null | undefined,
 ): Promise<void> {
   const next = normalizeDeviceSelection(name);
@@ -1686,6 +1743,7 @@ async function updateRunDeviceSelection(
     ...runPanelState,
     currentInputDevice: kind === "input" ? next : runPanelState.currentInputDevice,
     currentOutputDevice: kind === "output" ? next : runPanelState.currentOutputDevice,
+    currentMidiInputDevice: kind === "midi" ? next : runPanelState.currentMidiInputDevice,
     error: undefined,
   };
   postRunPanelState();
@@ -1701,11 +1759,18 @@ async function refreshRunDevices(): Promise<void> {
     return;
   }
   try {
-    const result = await sendRunControlRequest<{ inputDevices: string[]; outputDevices: string[] }>("getDevices");
+    const result = await sendRunControlRequest<{
+      inputDevices: string[];
+      outputDevices: string[];
+      midiInputDevices?: string[];
+    }>("getDevices");
     runPanelState = {
       ...runPanelState,
       inputDevices: result.inputDevices ?? [],
       outputDevices: result.outputDevices ?? [],
+      midiInputDevices: result.midiInputDevices
+        ? normalizeMidiInputDevices(result.midiInputDevices)
+        : runPanelState.midiInputDevices,
       error: undefined,
     };
     postRunPanelState();
@@ -1717,6 +1782,24 @@ async function refreshRunDevices(): Promise<void> {
     };
     postRunPanelState();
   }
+}
+
+function triggerRunMidiNote(
+  key: unknown,
+  velocity: unknown,
+  pressed: unknown,
+): void {
+  if (!runPanelState.connected) {
+    return;
+  }
+  const event = runMidiNoteEvent(runPanelState.midi, key, velocity, pressed);
+  if (!event) {
+    return;
+  }
+  sendRunControlNotification("triggerEvent", {
+    name: event.name,
+    values: event.values,
+  });
 }
 
 function sendRunControlRequest<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
@@ -1784,6 +1867,9 @@ function ensureRunPanel(): void {
       value?: RunScalarValue;
       values?: RunEventValue[];
       filePath?: string;
+      key?: number;
+      velocity?: number;
+      pressed?: boolean;
     };
     switch (payload.type) {
       case "webviewReady":
@@ -1799,11 +1885,7 @@ function ensureRunPanel(): void {
         }
         break;
       case "start":
-        if (runProcess && runPanelState.connected) {
-          await playRunProcessing();
-        } else {
-          await runFile(payload.path ?? runPanelState.path);
-        }
+        await runFile(payload.path ?? runPanelState.path);
         break;
       case "stop":
         await pauseRunProcessing();
@@ -1839,6 +1921,12 @@ function ensureRunPanel(): void {
         break;
       case "setOutputDevice":
         await updateRunDeviceSelection("output", payload.name);
+        break;
+      case "setMidiInputDevice":
+        await updateRunDeviceSelection("midi", payload.name);
+        break;
+      case "midiNote":
+        triggerRunMidiNote(payload.key, payload.velocity, payload.pressed);
         break;
       case "chooseBufferFile":
         if (typeof payload.name === "string") {
