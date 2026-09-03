@@ -16,10 +16,13 @@ test("bundled run view exposes the Onda 0.8 log and waveform UI", () => {
   assert.match(runHtml, /delegateTransportDropCount/);
 });
 
-test("bundled run view exposes MIDI input and the virtual keyboard", () => {
+test("bundled Onda 0.8.2 run view exposes MIDI input and keyboard monitoring", () => {
   assert.match(runHtml, /id="midi-input-device"/);
   assert.match(runHtml, /id="midi-keyboard"/);
   assert.match(runHtml, /type: "setMidiInputDevice"/);
   assert.match(runHtml, /type: "midiNote"/);
   assert.match(runHtml, /COMPUTER_MIDI_KEYS/);
+  assert.match(runHtml, /midiKeyboardInteractive: true/);
+  assert.match(runHtml, /message\.type === "midiActivity"/);
+  assert.match(runHtml, /function setMonitoredMidiNotes/);
 });
