@@ -21,6 +21,7 @@ import {
   RunProcessConfiguration,
   sameRunProcessConfiguration,
 } from "./runConfiguration";
+import { describeOndaExecutableError } from "./executableError";
 import {
   COMPUTER_KEYBOARD_MIDI_INPUT,
   NO_MIDI_CAPABILITIES,
@@ -384,6 +385,7 @@ async function runFile(
     runOutput?.append(text);
   });
   child.once("error", (error: Error) => {
+    const description = describeOndaExecutableError(command, error);
     const failedPath = fsPath;
     if (runProcess === child) {
       clearRunRuntimeState({ preservePath: failedPath });
@@ -394,12 +396,14 @@ async function runFile(
       connected: false,
       path: failedPath,
       status: "Failed to start",
-      error: error.message,
+      error: description.message,
     };
     postRunPanelState();
     runOutput?.show(true);
-    void vscode.window.showErrorMessage(
-      `Failed to start Onda run${failedPath ? ` (${path.basename(failedPath)})` : ""}: ${error.message}`,
+    void showOndaCommandError(
+      `Failed to start Onda run${failedPath ? ` (${path.basename(failedPath)})` : ""}`,
+      command,
+      error,
     );
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -659,6 +663,29 @@ function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
   };
 }
 
+const CONFIGURE_EXECUTABLE_ACTION = "Configure Executable";
+
+async function showOndaCommandError(
+  context: string,
+  command: string,
+  error: unknown,
+): Promise<void> {
+  const description = describeOndaExecutableError(command, error);
+  const message = `${context}: ${description.message}`;
+  if (!description.canConfigure) {
+    await vscode.window.showErrorMessage(message);
+    return;
+  }
+
+  const action = await vscode.window.showErrorMessage(message, CONFIGURE_EXECUTABLE_ACTION);
+  if (action === CONFIGURE_EXECUTABLE_ACTION) {
+    await vscode.commands.executeCommand(
+      "workbench.action.openSettings",
+      "onda.server.path",
+    );
+  }
+}
+
 function shellQuote(value: string): string {
   return /\s/.test(value) ? JSON.stringify(value) : value;
 }
@@ -862,9 +889,8 @@ async function executeProjectCommand(
     );
     return true;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
     projectOutput?.show(true);
-    void vscode.window.showErrorMessage(`Onda project command failed: ${message}`);
+    await showOndaCommandError("Onda project command failed", command, error);
     return false;
   }
 }
@@ -1073,7 +1099,7 @@ async function loadStoppedRunMetadata(
     });
 
     child.once("error", (error: Error) => {
-      fail(`failed to start daemon metadata refresh: ${error.message}`);
+      fail(describeOndaExecutableError(command, error).message);
     });
 
     child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -2151,5 +2177,12 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   };
 
   client = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
-  await client.start();
+  try {
+    await client.start();
+  } catch (error) {
+    client = undefined;
+    const description = describeOndaExecutableError(command, error);
+    serverOutput?.appendLine(`Failed to start: ${description.message}`);
+    await showOndaCommandError("Onda language server could not start", command, error);
+  }
 }
