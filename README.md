@@ -1,8 +1,8 @@
 <h1>
-  <img src="assets/svg/onda-logo-dark.svg" alt="onda logo" width="40" align="absmiddle" /> Onda VSCode extension
+  <img src="assets/svg/onda-logo-dark.svg" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
 </h1>
 
-This repo contains the VSCode extension for the [Onda](https://onda-lang.org) audio programming language.
+This repo contains the VS Code extension for the [Onda](https://onda-lang.org) audio programming language.
 
 It provides:
 
@@ -14,7 +14,7 @@ It provides:
 
 ## Requirements
 
-- VSCode 1.90 or newer
+- VS Code 1.90 or newer
 - Onda 0.8.0 or newer
 - an `onda` executable available on `PATH`, or an explicit configured path
 
@@ -28,7 +28,7 @@ This extension is available on Open VSX:
 
 If you already have a packaged `.vsix`, install it with:
 
-- VSCode Command Palette: `Extensions: Install from VSIX...`
+- VS Code Command Palette: `Extensions: Install from VSIX...`
 
 ### Option 2: build a `.vsix` locally from this repo
 
@@ -50,7 +50,7 @@ By default the extension starts:
 onda lsp
 ```
 
-You can configure the executable and run host in VSCode settings:
+You can configure the executable and run host in VS Code settings:
 
 - `onda.server.path`
 - `onda.server.args`
