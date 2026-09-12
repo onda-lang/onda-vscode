@@ -1,16 +1,16 @@
-# Onda VSCode Extension
+<h1>
+  <img src="assets/svg/onda-logo-dark.svg" alt="onda logo" width="40" align="absmiddle" /> Onda VSCode extension
+</h1>
 
-This extension adds VSCode support for Onda:
+This repo contains the VSCode extension for the [Onda](https://onda-lang.org) audio programming language.
 
-- `.onda` and `.on` language registration
-- `.ondaproject` JSON schema support
-- syntax highlighting
-- semantic tokens from `onda lsp`
-- `Onda: Run`
-- `Onda: Stop`
-- `Onda: Create Project…`
-- `Onda: Save as Project…`
-- `Onda: Restart Language Server`
+It provides:
+
+- `.onda`, `.on`, and `.ondaproject` filetype detection
+- regex syntax highlighting
+- builtin LSP startup through `onda lsp`
+- `Onda: Run` which launches the embedded webview for a source or project
+- project creation and source-only project export through `onda project`
 
 ## Requirements
 
@@ -100,14 +100,3 @@ starts the run transport, and opens the run UI.
 `Onda: Create Project…` creates an empty project or packages the active Onda source. `Onda: Save as
 Project…` packages the active or running source together with buffer files currently bound in the
 run panel. Both commands create a new portable project folder through the `onda project` CLI.
-
-## Development
-
-If you want to work on the extension itself:
-
-```bash
-npm install
-npm run compile
-```
-
-Then open this repo in VSCode and launch an Extension Development Host.
