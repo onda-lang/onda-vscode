@@ -1,5 +1,5 @@
 <h1>
-  <img src="assets/svg/onda-logo-dark.svg" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
+  <img src="assets/png/onda-logo-dark.png" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
 </h1>
 
 This repo contains the VS Code extension for the [Onda](https://onda-lang.org) audio programming language.

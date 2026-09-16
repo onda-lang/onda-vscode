@@ -2,9 +2,9 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code support for the Onda audio DSL",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "publisher": "onda-lang",
-  "icon": "assets/onda-logo-dark-rect.png",
+  "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "MIT",
   "repository": {
     "type": "git",
