@@ -26,3 +26,11 @@ test("bundled Onda 0.8.2 run view exposes MIDI input and keyboard monitoring", (
   assert.match(runHtml, /message\.type === "midiActivity"/);
   assert.match(runHtml, /function setMonitoredMidiNotes/);
 });
+
+test("bundled Onda 0.8.4 run view supports structured event arguments", () => {
+  assert.match(runHtml, /function isStructuredEventArg/);
+  assert.match(runHtml, /function structuredEventVisibleLines/);
+  assert.match(runHtml, /event-structured-arg/);
+  assert.match(runHtml, /JSON\.parse\(input\.value\)/);
+  assert.match(runHtml, /resetEventArguments/);
+});

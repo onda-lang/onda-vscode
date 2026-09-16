@@ -567,6 +567,28 @@
         min-width: 0;
       }
 
+      summary.event-arg-heading {
+        list-style: none;
+      }
+
+      summary.event-arg-heading::-webkit-details-marker {
+        display: none;
+      }
+
+      summary.event-arg-heading::before {
+        content: "▾";
+        flex: 0 0 auto;
+        align-self: center;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1;
+        transition: transform 120ms ease;
+      }
+
+      details:not([open]) summary.event-arg-heading::before {
+        transform: rotate(-90deg);
+      }
+
       .event-arg-name {
         overflow: hidden;
         color: var(--text);
@@ -593,6 +615,25 @@
         justify-self: end;
         min-height: 30px;
         padding: 0 3px;
+      }
+
+      .event-structured-arg {
+        display: block;
+      }
+
+      .event-structured-heading {
+        cursor: pointer;
+        padding: 4px 0;
+      }
+
+      .event-structured-arg[open] > .event-structured-heading {
+        margin-bottom: 6px;
+      }
+
+      .event-structured-arg > textarea {
+        box-sizing: border-box;
+        width: 100%;
+        resize: none;
       }
 
       .event-array-arg {
@@ -694,9 +735,23 @@
         display: grid;
         grid-template-columns: repeat(
           auto-fit,
-          minmax(min(100%, 200px), 1fr)
+          minmax(min(100%, var(--param-card-min, 200px)), 1fr)
         );
         gap: 8px;
+      }
+
+      .param-array {
+        grid-column: 1 / -1;
+        min-width: 0;
+      }
+
+      .param-array-heading {
+        cursor: pointer;
+        padding: 4px 0;
+      }
+
+      .param-array[open] > .param-array-heading {
+        margin-bottom: 8px;
       }
 
       .param {
@@ -1053,11 +1108,7 @@
       }
 
       #params[data-layout="knobs"] {
-        grid-template-columns: repeat(
-          auto-fit,
-          minmax(min(100%, 140px), 1fr)
-        );
-        gap: 8px;
+        --param-card-min: 140px;
       }
 
       #params[data-layout="knobs"] .param {
@@ -1684,6 +1735,8 @@
       const paramBindings = new Map();
       let pendingParamFrame = 0;
       let renderedParamSignature = "";
+      let renderedEvents = null;
+      let renderedEventShape = "";
       let pendingScopeFrame = 0;
       let latestScopeData = { channels: 0, samples: [] };
       let currentTheme = "";
@@ -2179,6 +2232,15 @@
       const FLOAT_CONTROL_TARGET_STEPS = 2000;
       const FLOAT_CONTROL_MIN_STEP = 0.0001;
       const FLOAT_CONTROL_MAX_STEP = 0.1;
+      const EVENT_STRUCTURED_MIN_VISIBLE_LINES = 4;
+      const EVENT_STRUCTURED_MAX_VISIBLE_LINES = 20;
+
+      function structuredEventVisibleLines(value) {
+        return Math.max(
+          EVENT_STRUCTURED_MIN_VISIBLE_LINES,
+          Math.min(EVENT_STRUCTURED_MAX_VISIBLE_LINES, value.split("\n").length),
+        );
+      }
 
       function scalarStepForParam(param) {
         // Keep this host policy aligned with onda_egui::scalar_step.
@@ -2557,6 +2619,7 @@
           params.map((param) => [
             param.name,
             param.label,
+            param.array,
             param.type,
             param.default,
             param.rangeMin,
@@ -2596,12 +2659,21 @@
           Object.assign(binding.param, incoming);
           if (activeParamGestures.has(incoming.name)) {
             binding.param.value = localValue;
-          } else {
+          } else if (!binding.isEditing?.()) {
             binding.setValue(incoming.value);
           }
           params[index] = binding.param;
         }
         return true;
+      }
+
+      function bindParamNumber(param, input, setValue) {
+        input.addEventListener("blur", () => setValue(param.value));
+        paramBindings.set(param.name, {
+          param,
+          isEditing: () => document.activeElement === input,
+          setValue,
+        });
       }
 
       function resetRenderedParams(signature) {
@@ -2632,7 +2704,12 @@
         return Number.isFinite(number) ? number : 0;
       }
 
+      function isStructuredEventArg(arg) {
+        return !/^(?:f32|f64|i32|i64|bool)(?:\[[0-9]*\])?$/.test(arg.type);
+      }
+
       function initialEventArgValue(arg) {
+        if (isStructuredEventArg(arg)) return structuredClone(arg.default ?? arg.value ?? {});
         if (isArrayEventArg(arg)) {
           const scalar = eventArrayScalarType(arg);
           return Array.isArray(arg.default)
@@ -2651,7 +2728,7 @@
       function hydrateEvents(events, existingEvents) {
         if (!Array.isArray(events)) return [];
         const previousEvents = Array.isArray(existingEvents) ? existingEvents : [];
-        return events.map(function (event) {
+        const hydrated = events.map(function (event) {
           const previous = previousEvents.find(function (item) {
             return item && item.name === event.name;
           });
@@ -2670,7 +2747,7 @@
                 ? rawValue
                 : initialEventArgValue(arg);
               return Object.assign({}, arg, {
-                value: isArrayEventArg(arg)
+                value: isStructuredEventArg(arg) ? value : isArrayEventArg(arg)
                   ? (Array.isArray(value)
                     ? value.map((item) => eventScalarValue(eventArrayScalarType(arg), item))
                     : [])
@@ -2679,10 +2756,15 @@
             }) : [],
           });
         });
+        // Preserve the objects captured by controls on unrelated host updates.
+        // Local argument edits already live in previousEvents.
+        return JSON.stringify(hydrated) === JSON.stringify(previousEvents)
+          ? previousEvents
+          : hydrated;
       }
 
       function isArrayEventArg(arg) {
-        return Boolean(arg && (
+        return Boolean(arg && !isStructuredEventArg(arg) && (
           arg.isSlice
           || (typeof arg.arrayLength === "number" && arg.arrayLength !== 1)
           || (typeof arg.type === "string" && /\[[0-9]*\]$/.test(arg.type))
@@ -2782,6 +2864,7 @@
         if (incoming.params) {
           incoming.params = hydrateParams(incoming.params);
         }
+        if (incoming.resetEventArguments === true) renderedEvents = null;
         if (incoming.events) {
           incoming.events = hydrateEvents(incoming.events, state.events);
         }
@@ -2844,6 +2927,211 @@
         return true;
       }
 
+      function renderEvents() {
+        const shape = JSON.stringify([
+          state.connected,
+          state.events.map((event) => (event.args || []).map((arg) =>
+            isArrayEventArg(arg) ? arg.value.length : null)),
+        ]);
+        if (renderedEvents === state.events && renderedEventShape === shape) return;
+        const structuredOpenStates = new Map(
+          [...eventsNode.querySelectorAll(".event-structured-arg")]
+            .map(group => [group.dataset.foldKey, group.open]),
+        );
+        renderedEvents = state.events;
+        renderedEventShape = shape;
+        eventsNode.replaceChildren();
+        if (state.events.length > 0) {
+          for (const event of state.events) {
+            const card = document.createElement("div");
+            card.className = "param event-card";
+
+            const eventHead = document.createElement("div");
+            eventHead.className = "event-head";
+            const head = document.createElement("div");
+            head.className = "event-identity";
+            head.innerHTML = '<div class="param-name"></div>';
+            head.querySelector(".param-name").textContent = event.name;
+            const argumentCount = Array.isArray(event.args) ? event.args.length : 0;
+            if (argumentCount > 0) {
+              const summary = document.createElement("div");
+              summary.className = "event-summary";
+              summary.textContent = argumentCount === 1
+                ? "1 argument"
+                : argumentCount + " arguments";
+              head.appendChild(summary);
+            }
+            head.title = event.name;
+
+            const trigger = document.createElement("button");
+            trigger.className = "event-trigger compact-action";
+            trigger.textContent = "Trigger";
+            const refreshTrigger = () => {
+              trigger.disabled = !state.connected || Boolean(controls.querySelector(":invalid"));
+            };
+            eventHead.append(head, trigger);
+            card.appendChild(eventHead);
+
+            const controls = document.createElement("div");
+            controls.className = "event-args";
+            if (argumentCount > 0) card.appendChild(controls);
+
+            for (const arg of event.args || []) {
+              const structured = isStructuredEventArg(arg);
+              const setting = document.createElement(structured ? "details" : "div");
+              setting.className = structured
+                ? "event-arg event-structured-arg"
+                : "event-arg";
+
+              const label = document.createElement(structured ? "summary" : "div");
+              label.className = structured
+                ? "event-arg-heading event-structured-heading"
+                : "event-arg-heading";
+              const argName = document.createElement("span");
+              argName.className = "event-arg-name";
+              argName.textContent = arg.name;
+              const argType = document.createElement("span");
+              argType.className = "event-arg-type";
+              argType.textContent = arg.type;
+              label.append(argName, argType);
+              label.title = arg.name + ": " + arg.type;
+              setting.appendChild(label);
+
+              if (structured) {
+                setting.dataset.foldKey = JSON.stringify([event.name, arg.name, arg.type]);
+                setting.open = structuredOpenStates.get(setting.dataset.foldKey) ?? true;
+                const input = document.createElement("textarea");
+                input.className = "param-number";
+                input.value = JSON.stringify(arg.value, null, 2);
+                input.rows = structuredEventVisibleLines(input.value);
+                input.disabled = !state.connected;
+                input.setAttribute("aria-label", arg.name + " JSON value");
+                input.addEventListener("input", () => {
+                  input.rows = structuredEventVisibleLines(input.value);
+                  try {
+                    arg.value = JSON.parse(input.value);
+                    input.setCustomValidity("");
+                  } catch {
+                    input.setCustomValidity("Enter a valid JSON value");
+                  }
+                  refreshTrigger();
+                });
+                setting.appendChild(input);
+              } else if (isArrayEventArg(arg)) {
+                setting.classList.add("event-array-arg");
+                const arrayHead = document.createElement("div");
+                arrayHead.className = "event-array-head";
+                arrayHead.appendChild(label);
+
+                const expectedLength = eventArrayLength(arg);
+                if (!Array.isArray(arg.value)) arg.value = [];
+                if (expectedLength !== null) {
+                  arg.value = Array.from(
+                    { length: expectedLength },
+                    (_, index) => arg.value[index] ?? (eventArrayScalarType(arg) === "bool" ? false : 0),
+                  );
+                }
+
+                const count = document.createElement("span");
+                count.className = "event-array-count";
+                count.textContent = arg.value.length === 1
+                  ? "1 element"
+                  : arg.value.length + " elements";
+                arrayHead.appendChild(count);
+
+                if (expectedLength === null) {
+                  const actions = document.createElement("div");
+                  actions.className = "event-array-actions";
+                  const remove = document.createElement("button");
+                  remove.className = "secondary event-array-action";
+                  remove.textContent = "−";
+                  remove.title = "Remove last element";
+                  remove.setAttribute("aria-label", "Remove last element");
+                  remove.disabled = !state.connected || arg.value.length === 0;
+                  const add = document.createElement("button");
+                  add.className = "secondary event-array-action";
+                  add.textContent = "+";
+                  add.title = "Add element";
+                  add.setAttribute("aria-label", "Add element");
+                  add.disabled = !state.connected || arg.value.length >= 16;
+                  remove.addEventListener("click", () => {
+                    arg.value.pop();
+                    render();
+                  });
+                  add.addEventListener("click", () => {
+                    const scalar = eventArrayScalarType(arg);
+                    arg.value.push(eventScalarValue(scalar, 0));
+                    render();
+                  });
+                  actions.append(remove, add);
+                  arrayHead.appendChild(actions);
+                }
+                setting.appendChild(arrayHead);
+
+                if (arg.value.length === 0) {
+                  const note = document.createElement("div");
+                  note.className = "event-array-note";
+                  note.textContent = "No elements. Add one to build the event payload.";
+                  setting.appendChild(note);
+                } else {
+                  const grid = document.createElement("div");
+                  grid.className = "event-array-grid";
+                  const scalarType = eventArrayScalarType(arg);
+                  arg.value.slice(0, 16).forEach((value, index) => {
+                    const element = document.createElement("label");
+                    element.className = "event-array-element";
+                    const elementIndex = document.createElement("span");
+                    elementIndex.className = "event-array-index";
+                    elementIndex.textContent = "[" + index + "]";
+                    element.appendChild(elementIndex);
+
+                    element.appendChild(createEventScalarControl(
+                      scalarType,
+                      value,
+                      (nextValue) => { arg.value[index] = nextValue; },
+                    ));
+                    grid.appendChild(element);
+                  });
+                  setting.appendChild(grid);
+
+                  if (arg.value.length > 16) {
+                    const note = document.createElement("div");
+                    note.className = "event-array-note";
+                    note.textContent = (arg.value.length - 16)
+                      + " additional elements are retained but not shown";
+                    setting.appendChild(note);
+                  }
+                }
+              } else {
+                setting.appendChild(createEventScalarControl(
+                  arg.type,
+                  arg.value,
+                  (nextValue) => { arg.value = nextValue; },
+                ));
+              }
+
+              controls.appendChild(setting);
+            }
+
+            refreshTrigger();
+            trigger.addEventListener("click", () => {
+              hostBridge.postMessage({
+                type: "triggerEvent",
+                name: event.name,
+                values: (event.args || []).map((arg) =>
+                  (isStructuredEventArg(arg) || isArrayEventArg(arg))
+                    ? arg.value
+                    : eventScalarValue(arg.type, arg.value)
+                ),
+              });
+            });
+
+            eventsNode.appendChild(card);
+          }
+        }
+
+      }
+
       function render() {
         const logWasAtBottom =
           logOutputNode.scrollHeight - logOutputNode.clientHeight - logOutputNode.scrollTop <= 1;
@@ -2896,7 +3184,7 @@
         embedBuffersInput.checked = state.embedBuffers === true;
         embedBuffersLabel.textContent =
           state.embedBuffers === true && state.embeddedBuffersReady !== true
-            ? "Embedding buffers…"
+            ? "Embedding buffers..."
             : "Embed in DAW project";
         eventsSection.style.display = hasEvents ? "" : "none";
         logSection.style.display = state.logRevealed === true ? "" : "none";
@@ -3008,170 +3296,7 @@
           }
         }
 
-        eventsNode.replaceChildren();
-        if (hasEvents) {
-          for (const event of state.events) {
-            const card = document.createElement("div");
-            card.className = "param event-card";
-
-            const eventHead = document.createElement("div");
-            eventHead.className = "event-head";
-            const head = document.createElement("div");
-            head.className = "event-identity";
-            head.innerHTML = '<div class="param-name"></div>';
-            head.querySelector(".param-name").textContent = event.name;
-            const argumentCount = Array.isArray(event.args) ? event.args.length : 0;
-            if (argumentCount > 0) {
-              const summary = document.createElement("div");
-              summary.className = "event-summary";
-              summary.textContent = argumentCount === 1
-                ? "1 argument"
-                : argumentCount + " arguments";
-              head.appendChild(summary);
-            }
-            head.title = event.name;
-
-            const trigger = document.createElement("button");
-            trigger.className = "event-trigger compact-action";
-            trigger.textContent = "Trigger";
-            const refreshTrigger = () => {
-              trigger.disabled = !state.connected;
-            };
-            eventHead.append(head, trigger);
-            card.appendChild(eventHead);
-
-            const controls = document.createElement("div");
-            controls.className = "event-args";
-            if (argumentCount > 0) card.appendChild(controls);
-
-            for (const arg of event.args || []) {
-              const setting = document.createElement("div");
-              setting.className = "event-arg";
-
-              const label = document.createElement("div");
-              label.className = "event-arg-heading";
-              const argName = document.createElement("span");
-              argName.className = "event-arg-name";
-              argName.textContent = arg.name;
-              const argType = document.createElement("span");
-              argType.className = "event-arg-type";
-              argType.textContent = arg.type;
-              label.append(argName, argType);
-              label.title = arg.name + ": " + arg.type;
-              setting.appendChild(label);
-
-              if (isArrayEventArg(arg)) {
-                setting.classList.add("event-array-arg");
-                const arrayHead = document.createElement("div");
-                arrayHead.className = "event-array-head";
-                arrayHead.appendChild(label);
-
-                const expectedLength = eventArrayLength(arg);
-                if (!Array.isArray(arg.value)) arg.value = [];
-                if (expectedLength !== null) {
-                  arg.value = Array.from(
-                    { length: expectedLength },
-                    (_, index) => arg.value[index] ?? (eventArrayScalarType(arg) === "bool" ? false : 0),
-                  );
-                }
-
-                const count = document.createElement("span");
-                count.className = "event-array-count";
-                count.textContent = arg.value.length === 1
-                  ? "1 element"
-                  : arg.value.length + " elements";
-                arrayHead.appendChild(count);
-
-                if (expectedLength === null) {
-                  const actions = document.createElement("div");
-                  actions.className = "event-array-actions";
-                  const remove = document.createElement("button");
-                  remove.className = "secondary event-array-action";
-                  remove.textContent = "−";
-                  remove.title = "Remove last element";
-                  remove.setAttribute("aria-label", "Remove last element");
-                  remove.disabled = !state.connected || arg.value.length === 0;
-                  const add = document.createElement("button");
-                  add.className = "secondary event-array-action";
-                  add.textContent = "+";
-                  add.title = "Add element";
-                  add.setAttribute("aria-label", "Add element");
-                  add.disabled = !state.connected || arg.value.length >= 16;
-                  remove.addEventListener("click", () => {
-                    arg.value.pop();
-                    render();
-                  });
-                  add.addEventListener("click", () => {
-                    const scalar = eventArrayScalarType(arg);
-                    arg.value.push(eventScalarValue(scalar, 0));
-                    render();
-                  });
-                  actions.append(remove, add);
-                  arrayHead.appendChild(actions);
-                }
-                setting.appendChild(arrayHead);
-
-                if (arg.value.length === 0) {
-                  const note = document.createElement("div");
-                  note.className = "event-array-note";
-                  note.textContent = "No elements. Add one to build the event payload.";
-                  setting.appendChild(note);
-                } else {
-                  const grid = document.createElement("div");
-                  grid.className = "event-array-grid";
-                  const scalarType = eventArrayScalarType(arg);
-                  arg.value.slice(0, 16).forEach((value, index) => {
-                    const element = document.createElement("label");
-                    element.className = "event-array-element";
-                    const elementIndex = document.createElement("span");
-                    elementIndex.className = "event-array-index";
-                    elementIndex.textContent = "[" + index + "]";
-                    element.appendChild(elementIndex);
-
-                    element.appendChild(createEventScalarControl(
-                      scalarType,
-                      value,
-                      (nextValue) => { arg.value[index] = nextValue; },
-                    ));
-                    grid.appendChild(element);
-                  });
-                  setting.appendChild(grid);
-
-                  if (arg.value.length > 16) {
-                    const note = document.createElement("div");
-                    note.className = "event-array-note";
-                    note.textContent = (arg.value.length - 16)
-                      + " additional elements are retained but not shown";
-                    setting.appendChild(note);
-                  }
-                }
-              } else {
-                setting.appendChild(createEventScalarControl(
-                  arg.type,
-                  arg.value,
-                  (nextValue) => { arg.value = nextValue; },
-                ));
-              }
-
-              controls.appendChild(setting);
-            }
-
-            refreshTrigger();
-            trigger.addEventListener("click", () => {
-              hostBridge.postMessage({
-                type: "triggerEvent",
-                name: event.name,
-                values: (event.args || []).map((arg) =>
-                  isArrayEventArg(arg)
-                    ? arg.value
-                    : eventScalarValue(arg.type, arg.value)
-                ),
-              });
-            });
-
-            eventsNode.appendChild(card);
-          }
-        }
+        renderEvents();
 
         const logText = state.logText || "";
         const logEntries = Array.isArray(state.logEntries) ? state.logEntries : [];
@@ -3200,8 +3325,32 @@
         if (updateRenderedParams(state.params)) {
           return;
         }
+        const arrayOpenStates = new Map(
+          [...paramsNode.querySelectorAll(".param-array")]
+            .map(group => [group.dataset.name, group.open]),
+        );
         resetRenderedParams(paramSignature);
+        const arrayContainers = new Map();
         for (const param of state.params) {
+          let container = paramsNode;
+          if (param.array) {
+            const { name, length } = param.array;
+            container = arrayContainers.get(name);
+            if (!container) {
+              const group = document.createElement("details");
+              group.className = "param-array";
+              group.dataset.name = name;
+              group.open = arrayOpenStates.get(name) ?? true;
+              const heading = document.createElement("summary");
+              heading.className = "param-array-heading";
+              heading.textContent = `${name} [${length}]`;
+              container = document.createElement("div");
+              container.className = "param-list";
+              group.append(heading, container);
+              paramsNode.appendChild(group);
+              arrayContainers.set(name, container);
+            }
+          }
           const card = document.createElement("div");
           card.className = "param";
 
@@ -3304,7 +3453,7 @@
                 sync(number.value);
                 commitParamMessage(param.name, Number(number.value));
               });
-              paramBindings.set(param.name, { param, setValue: sync });
+              bindParamNumber(param, number, sync);
             } else {
               const number = document.createElement("input");
               number.className = "param-number";
@@ -3328,23 +3477,20 @@
                 });
               });
               controls.appendChild(number);
-              paramBindings.set(param.name, {
-                param,
-                setValue(nextValue) {
-                  const parsed = Number(nextValue);
-                  if (!Number.isFinite(parsed)) {
-                    return;
-                  }
-                  const quantized = quantizeToStep(parsed, 0, stepValue);
-                  param.value = quantized;
-                  number.value = formatNumberForInput(quantized, stepValue);
-                },
+              bindParamNumber(param, number, (nextValue) => {
+                const parsed = Number(nextValue);
+                if (!Number.isFinite(parsed)) {
+                  return;
+                }
+                const quantized = quantizeToStep(parsed, 0, stepValue);
+                param.value = quantized;
+                number.value = formatNumberForInput(quantized, stepValue);
               });
             }
 
           }
 
-          paramsNode.appendChild(card);
+          container.appendChild(card);
         }
       }
 

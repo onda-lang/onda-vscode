@@ -31,7 +31,13 @@ import {
 } from "./runMidi";
 
 type RunScalarValue = boolean | number | null;
-type RunEventValue = boolean | number | string | null | RunEventValue[];
+type RunEventValue =
+  | boolean
+  | number
+  | string
+  | null
+  | RunEventValue[]
+  | { [key: string]: RunEventValue };
 
 interface RunParamPayload {
   index: number;
@@ -1504,12 +1510,18 @@ function declaredParamDefaultValue(
 function initialEventArgValue(
   arg: Pick<RunEventArgPayload, "type" | "default" | "value">,
 ): RunEventValue {
+  if (!/^(?:f32|f64|i32|i64|bool)(?:\[[0-9]*\])?$/.test(arg.type)) {
+    return cloneRunEventValue(arg.default ?? arg.value ?? {});
+  }
   if (Array.isArray(arg.default)) {
     return arg.default.map(cloneRunEventValue);
   }
   if (arg.default !== null && arg.default !== undefined) {
     if (arg.type === "bool") {
       return Boolean(arg.default);
+    }
+    if (arg.type === "i64") {
+      return String(arg.default);
     }
     const defaultValue = Number(arg.default);
     return Number.isFinite(defaultValue) ? defaultValue : 0;
@@ -1527,13 +1539,24 @@ function initialEventArgValue(
     return arg.value.map(cloneRunEventValue);
   }
   if (arg.value !== null && arg.value !== undefined) {
+    if (arg.type === "i64") {
+      return String(arg.value);
+    }
     return arg.value;
   }
-  return 0;
+  return arg.type === "i64" ? "0" : 0;
 }
 
 function cloneRunEventValue(value: RunEventValue): RunEventValue {
-  return Array.isArray(value) ? value.map(cloneRunEventValue) : value;
+  if (Array.isArray(value)) {
+    return value.map(cloneRunEventValue);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, cloneRunEventValue(item)]),
+    );
+  }
+  return value;
 }
 
 function runParamDefaultValue(param: RunParamState): RunScalarValue {
@@ -1669,7 +1692,7 @@ function resetRunEventArguments(): void {
       })),
     })),
   };
-  postRunPanelState();
+  postRunPanelState({ resetEventArguments: true });
 }
 
 async function bindRunBufferFile(
@@ -1997,7 +2020,7 @@ function revealRunPanel(): void {
   runPanel.reveal(runPanel.viewColumn);
 }
 
-function postRunPanelState(): void {
+function postRunPanelState(options: { resetEventArguments?: boolean } = {}): void {
   if (!runPanel) {
     return;
   }
@@ -2005,6 +2028,7 @@ function postRunPanelState(): void {
     type: "state",
     state: {
       ...runPanelState,
+      ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
       supportsSourceSelection: false,
       supportsProjectExport: Boolean(
         runPanelState.path && isOndaSourcePath(runPanelState.path),
