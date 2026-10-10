@@ -82,6 +82,10 @@ The sample rate and block size are passed to both the embedded webview and
 native egui run hosts. Changing either setting takes effect the next time you
 run a file.
 
+The run panel's **Smooth** control adjusts parameter smoothing live. It starts at
+30 ms; set it to 0 to disable smoothing, or double-click to restore 30 ms. The
+chosen duration is preserved across source reloads and run restarts.
+
 ## Using the extension
 
 Open an `.onda` or `.on` file and the extension will activate automatically.

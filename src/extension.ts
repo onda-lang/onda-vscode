@@ -139,6 +139,7 @@ interface RunPanelState extends RunLogState {
   currentMidiInputDevice: string | null;
   sampleRateHz: number;
   blockFrames: number;
+  paramSmoothingMs: number;
 }
 
 interface PendingControlRequest {
@@ -171,6 +172,13 @@ const SCOPE_POLL_INTERVAL_MS = 50;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
 const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
 const DEFAULT_RUN_BLOCK_FRAMES = 256;
+const DEFAULT_PARAM_SMOOTHING_MS = 30;
+// Match Rust's usize::MAX converted to f64 on the local host.
+const RUN_SAMPLE_COUNTER_MAX = Number(
+  process.arch === "ia32" || process.arch === "arm" ? 0xffff_ffffn : 0xffff_ffff_ffff_ffffn,
+);
+let paramSmoothingUpdateId = 0;
+let confirmedParamSmoothing = { id: 0, milliseconds: DEFAULT_PARAM_SMOOTHING_MS };
 const preservedRunBufferPaths = new Map<string, string>();
 let runPanelState: RunPanelState = {
   ...initialRunLogState(),
@@ -191,6 +199,7 @@ let runPanelState: RunPanelState = {
   currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
   sampleRateHz: DEFAULT_RUN_SAMPLE_RATE_HZ,
   blockFrames: DEFAULT_RUN_BLOCK_FRAMES,
+  paramSmoothingMs: DEFAULT_PARAM_SMOOTHING_MS,
 };
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -330,11 +339,16 @@ async function runFile(
     currentMidiInputDevice: runPanelState.currentMidiInputDevice,
     sampleRateHz,
     blockFrames,
+    paramSmoothingMs: runPanelState.paramSmoothingMs,
   };
   postRunPanelState();
 
   await stopFile({ silent: true, preservePath: fsPath });
   runProcessingRequested = true;
+  confirmedParamSmoothing = {
+    id: ++paramSmoothingUpdateId,
+    milliseconds: runPanelState.paramSmoothingMs,
+  };
 
   const { command, extraArgs } = ondaExecutableConfig();
   const args =
@@ -346,6 +360,8 @@ async function runFile(
     runPanelState.sampleRateHz.toString(),
     "--block-size",
     runPanelState.blockFrames.toString(),
+    "--param-smoothing-ms",
+    runPanelState.paramSmoothingMs.toString(),
   );
   if (runPanelState.currentInputDevice) {
     args.push("--input-device", runPanelState.currentInputDevice);
@@ -1276,6 +1292,7 @@ function connectRunControl(port: number): void {
     postRunPanelState();
     sendRunControlNotification("subscribeDelegates");
     void Promise.all([
+      updateRunParamSmoothing(runPanelState.paramSmoothingMs),
       refreshRunParams(),
       refreshRunBuffers(),
       refreshRunEvents(),
@@ -1568,6 +1585,48 @@ function queueRunParamSend(name: string, value: RunScalarValue): void {
     return;
   }
   sendRunControlNotification("setParam", { name, value });
+}
+
+async function updateRunParamSmoothing(milliseconds: unknown): Promise<void> {
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds) || milliseconds < 0) {
+    postRunPanelState();
+    return;
+  }
+  const sampleRateHz = runProcess
+    ? runPanelState.sampleRateHz
+    : ondaRunAudioSettings().sampleRateHz;
+  if (Math.ceil((milliseconds / 1000) * sampleRateHz) >= RUN_SAMPLE_COUNTER_MAX) {
+    runPanelState = {
+      ...runPanelState,
+      error: "Parameter smoothing must fit the host sample counter.",
+    };
+    postRunPanelState();
+    return;
+  }
+  const updateId = ++paramSmoothingUpdateId;
+  const socket = runControlSocket;
+  runPanelState = { ...runPanelState, paramSmoothingMs: milliseconds, error: undefined };
+  if (!runPanelState.connected) {
+    postRunPanelState();
+    return;
+  }
+  try {
+    await sendRunControlRequest("setParamSmoothing", { value: milliseconds / 1000 });
+    if (socket !== runControlSocket) return;
+    if (updateId > confirmedParamSmoothing.id) {
+      confirmedParamSmoothing = { id: updateId, milliseconds };
+    }
+    // Drag updates can overlap; only the latest completion reconciles the view.
+    if (updateId !== paramSmoothingUpdateId) return;
+  } catch (error) {
+    if (socket !== runControlSocket || updateId !== paramSmoothingUpdateId) return;
+    runPanelState = {
+      ...runPanelState,
+      paramSmoothingMs: confirmedParamSmoothing.milliseconds,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  postRunPanelState();
 }
 
 function describeRunBufferChannels(buffer: RunBufferPayload): string {
@@ -1919,6 +1978,7 @@ function ensureRunPanel(): void {
       key?: number;
       velocity?: number;
       pressed?: boolean;
+      milliseconds?: number;
     };
     switch (payload.type) {
       case "webviewReady":
@@ -1959,6 +2019,9 @@ function ensureRunPanel(): void {
         if (typeof payload.name === "string") {
           applyRunParamChange(payload.name, payload.value ?? null);
         }
+        break;
+      case "setParamSmoothing":
+        await updateRunParamSmoothing(payload.milliseconds);
         break;
       case "triggerEvent":
         if (typeof payload.name === "string") {
@@ -2028,6 +2091,7 @@ function postRunPanelState(options: { resetEventArguments?: boolean } = {}): voi
     type: "state",
     state: {
       ...runPanelState,
+      ondaVersion: client?.initializeResult?.serverInfo?.version ?? undefined,
       ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
       supportsSourceSelection: false,
       supportsProjectExport: Boolean(
@@ -2039,6 +2103,8 @@ function postRunPanelState(options: { resetEventArguments?: boolean } = {}): voi
       supportsTransport: true,
       supportsDeviceSelection: true,
       supportsRunSettings: false,
+      supportsParamSmoothing: true,
+      paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
       supportsScope: true,
     },
   });
@@ -2113,10 +2179,12 @@ function renderSharedRunHtml(webview: vscode.Webview): string {
     </body></html>`;
   }
 
-  const paramControlUri = webview.asWebviewUri(
-    vscode.Uri.file(path.join(path.dirname(resolvedPath), "param-control.js")),
-  );
-  html = html.replace("./param-control.js", paramControlUri.toString());
+  for (const asset of ["param-control.js", "number-input.js"]) {
+    const assetUri = webview.asWebviewUri(
+      vscode.Uri.file(path.join(path.dirname(resolvedPath), asset)),
+    );
+    html = html.replace(`./${asset}`, assetUri.toString());
+  }
 
   // Inject the VS Code host bridge before the page script runs, and add the CSP header.
   const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${runTheme}" };</script>`;
@@ -2203,6 +2271,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   client = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
   try {
     await client.start();
+    postRunPanelState();
   } catch (error) {
     client = undefined;
     const description = describeOndaExecutableError(command, error);
