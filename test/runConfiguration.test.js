@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const test = require("node:test");
+const { createRunPanel } = require("./helpers/runPanel");
 
 const {
   sameRunProcessConfiguration,
@@ -29,4 +31,28 @@ test("run configuration changes when any process-bound device changes", () => {
       false,
     );
   }
+});
+
+test("run panel and Onda process use the configured audio settings", async () => {
+  let launchArgs;
+  const panel = createRunPanel(undefined, {
+    settings: { "run.sampleRate": 96_000, "run.blockSize": 1024 },
+    modules: {
+      child_process: { spawn(command, args) {
+        launchArgs = args;
+        return Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(), stderr: new EventEmitter(),
+        });
+      } },
+    },
+  });
+  assert.equal(panel.messages.at(-1).state.blockSamples, 256);
+
+  await panel.evaluate('runFile("/tmp/audio-settings.onda")');
+
+  const state = panel.messages.at(-1).state;
+  assert.equal(state.sampleRateHz, 96_000);
+  assert.equal(state.blockSamples, 1024);
+  assert.equal(launchArgs[launchArgs.indexOf("--sample-rate") + 1], "96000");
+  assert.equal(launchArgs[launchArgs.indexOf("--block-size") + 1], "1024");
 });

@@ -10,13 +10,14 @@ test("run panel shows the version of the configured Onda executable", () => {
   const { messages } = createRunPanel();
   const state = messages.at(-1).state;
   const node = { hidden: true, textContent: "" };
+  const numberNode = { textContent: "" };
   const html = fs.readFileSync(path.join(__dirname, "..", "ui", "run", "run.html"), "utf8");
   const versionScript = html.slice(html.indexOf("const ondaVersionNode"), html.indexOf("showOndaVersion(window.__hostBridge?.ondaVersion);"));
   vm.runInNewContext(versionScript + "\nshowOndaVersion(incoming.ondaVersion);", {
-    document: { getElementById: () => node }, incoming: state,
+    document: { getElementById: id => id === "onda-version" ? node : numberNode }, incoming: state,
   });
   assert.equal(node.hidden, false);
-  assert.equal(node.textContent, "Onda 0.8.20");
+  assert.equal(numberNode.textContent, "0.8.20");
 });
 
 test("missing server version leaves the run panel usable", () => {

@@ -138,7 +138,7 @@ interface RunPanelState extends RunLogState {
   currentOutputDevice: string | null;
   currentMidiInputDevice: string | null;
   sampleRateHz: number;
-  blockFrames: number;
+  blockSamples: number;
   paramSmoothingMs: number;
 }
 
@@ -198,7 +198,7 @@ let runPanelState: RunPanelState = {
   currentOutputDevice: null,
   currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
   sampleRateHz: DEFAULT_RUN_SAMPLE_RATE_HZ,
-  blockFrames: DEFAULT_RUN_BLOCK_FRAMES,
+  blockSamples: DEFAULT_RUN_BLOCK_FRAMES,
   paramSmoothingMs: DEFAULT_PARAM_SMOOTHING_MS,
 };
 
@@ -338,7 +338,7 @@ async function runFile(
     currentOutputDevice: runPanelState.currentOutputDevice,
     currentMidiInputDevice: runPanelState.currentMidiInputDevice,
     sampleRateHz,
-    blockFrames,
+    blockSamples: blockFrames,
     paramSmoothingMs: runPanelState.paramSmoothingMs,
   };
   postRunPanelState();
@@ -359,7 +359,7 @@ async function runFile(
     "--sample-rate",
     runPanelState.sampleRateHz.toString(),
     "--block-size",
-    runPanelState.blockFrames.toString(),
+    runPanelState.blockSamples.toString(),
     "--param-smoothing-ms",
     runPanelState.paramSmoothingMs.toString(),
   );
@@ -1196,7 +1196,7 @@ function handleRunStdoutLine(line: string): void {
             ? COMPUTER_KEYBOARD_MIDI_INPUT
             : null),
         sampleRateHz: runPanelState.sampleRateHz,
-        blockFrames: runPanelState.blockFrames,
+        blockSamples: runPanelState.blockSamples,
       };
       postRunPanelState();
       connectRunControl(payload.port);
