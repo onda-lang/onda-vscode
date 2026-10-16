@@ -2193,7 +2193,7 @@ function renderSharedRunHtml(webview: vscode.Webview): string {
     </body></html>`;
   }
 
-  for (const asset of ["param-control.js", "number-input.js"]) {
+  for (const asset of ["param-control.js", "buffers.js", "number-input.js"]) {
     const assetUri = webview.asWebviewUri(
       vscode.Uri.file(path.join(path.dirname(resolvedPath), asset)),
     );
