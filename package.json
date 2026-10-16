@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code support for the Onda audio DSL",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -20,6 +20,7 @@
     "onLanguage:onda",
     "onCommand:onda.restartLanguageServer",
     "onCommand:onda.runFile",
+    "onCommand:onda.runFileWithFastMath",
     "onCommand:onda.createProject",
     "onCommand:onda.saveAsProject",
     "onCommand:onda.stopFile"
@@ -108,6 +109,10 @@
         "icon": "$(play)"
       },
       {
+        "command": "onda.runFileWithFastMath",
+        "title": "Onda: Run with Fast Math"
+      },
+      {
         "command": "onda.createProject",
         "title": "Onda: Create Project…"
       },
@@ -141,6 +146,11 @@
       "explorer/context": [
         {
           "command": "onda.runFile",
+          "when": "resourceExtname == .onda || resourceExtname == .on || resourceExtname == .ondaproject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "onda.runFileWithFastMath",
           "when": "resourceExtname == .onda || resourceExtname == .on || resourceExtname == .ondaproject",
           "group": "navigation@1"
         },

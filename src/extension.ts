@@ -139,6 +139,7 @@ interface RunPanelState extends RunLogState {
   currentMidiInputDevice: string | null;
   sampleRateHz: number;
   blockSamples: number;
+  fastMath: boolean;
   paramSmoothingMs: number;
 }
 
@@ -199,6 +200,7 @@ let runPanelState: RunPanelState = {
   currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
   sampleRateHz: DEFAULT_RUN_SAMPLE_RATE_HZ,
   blockSamples: DEFAULT_RUN_BLOCK_FRAMES,
+  fastMath: false,
   paramSmoothingMs: DEFAULT_PARAM_SMOOTHING_MS,
 };
 
@@ -217,6 +219,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.runFile", async (resource?: vscode.Uri) => {
       await runFile(resource);
+    }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("onda.runFileWithFastMath", async (resource?: vscode.Uri) => {
+      await runFile(resource, { fastMath: true });
     }),
   );
   context.subscriptions.push(
@@ -271,7 +278,7 @@ async function restartClient(): Promise<void> {
 
 async function runFile(
   preferredInput?: string | vscode.Uri,
-  options?: { restart?: boolean },
+  options?: { restart?: boolean; fastMath?: boolean },
 ): Promise<void> {
   const fsPath = await resolveRunPath(preferredInput);
   if (!fsPath) {
@@ -284,9 +291,11 @@ async function runFile(
   const runHost = ondaRunHostSetting();
   const runTheme = ondaRunThemeSetting();
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
+  const fastMath = options?.fastMath ?? false;
   const desiredRunConfiguration: RunProcessConfiguration = {
     sampleRateHz,
     blockFrames,
+    fastMath,
     inputDevice: runPanelState.currentInputDevice,
     outputDevice: runPanelState.currentOutputDevice,
     midiInputDevice: runPanelState.currentMidiInputDevice,
@@ -339,6 +348,7 @@ async function runFile(
     currentMidiInputDevice: runPanelState.currentMidiInputDevice,
     sampleRateHz,
     blockSamples: blockFrames,
+    fastMath,
     paramSmoothingMs: runPanelState.paramSmoothingMs,
   };
   postRunPanelState();
@@ -363,6 +373,9 @@ async function runFile(
     "--param-smoothing-ms",
     runPanelState.paramSmoothingMs.toString(),
   );
+  if (fastMath) {
+    args.push("--fast-math");
+  }
   if (runPanelState.currentInputDevice) {
     args.push("--input-device", runPanelState.currentInputDevice);
   }
@@ -623,7 +636,7 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
     return;
   }
   if (runProcess && runPath) {
-    await runFile(document.uri.fsPath, { restart: true });
+    await runFile(document.uri.fsPath, { restart: true, fastMath: runPanelState.fastMath });
     return;
   }
   await refreshStoppedRunMetadata(document.uri.fsPath);
@@ -1831,6 +1844,7 @@ function clearRunPanelMemory(): void {
     currentInputDevice: null,
     currentOutputDevice: null,
     currentMidiInputDevice: COMPUTER_KEYBOARD_MIDI_INPUT,
+    fastMath: false,
   };
 }
 
@@ -1859,7 +1873,7 @@ async function updateRunDeviceSelection(
   if (!runPanelState.running || !runPanelState.path) {
     return;
   }
-  await runFile(runPanelState.path, { restart: true });
+  await runFile(runPanelState.path, { restart: true, fastMath: runPanelState.fastMath });
 }
 
 async function refreshRunDevices(): Promise<void> {
@@ -1994,7 +2008,7 @@ function ensureRunPanel(): void {
         }
         break;
       case "start":
-        await runFile(payload.path ?? runPanelState.path);
+        await runFile(payload.path ?? runPanelState.path, { fastMath: runPanelState.fastMath });
         break;
       case "stop":
         await pauseRunProcessing();

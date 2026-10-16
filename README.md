@@ -15,7 +15,7 @@ It provides:
 ## Requirements
 
 - VS Code 1.90 or newer
-- Onda 0.8.0 or newer
+- Onda 0.8.31 or newer
 - an `onda` executable available on `PATH`, or an explicit configured path
 
 ## Install
@@ -93,6 +93,7 @@ Open an `.onda` or `.on` file and the extension will activate automatically.
 Available commands:
 
 - `Onda: Run`
+- `Onda: Run with Fast Math`
 - `Onda: Stop`
 - `Onda: Create Project…`
 - `Onda: Save as Project…`
@@ -100,6 +101,13 @@ Available commands:
 
 `Onda: Run` accepts `.onda`, `.on`, and `.ondaproject` files from the active editor or Explorer,
 starts the run transport, and opens the run UI.
+
+`Onda: Run with Fast Math` enables Onda's `--fast-math` compiler option for that
+run session in either host. Find it in the Command Palette or the file's Explorer
+context menu. Fast math allows floating-point optimizations that can change
+numerical results. The run header shows **Fast Math** while enabled. Saving the
+source, changing devices, or using the panel's Play button keeps the session's
+mode. Use regular `Onda: Run` to return to normal math. No setting is saved.
 
 `Onda: Create Project…` creates an empty project or packages the active Onda source. `Onda: Save as
 Project…` packages the active or running source together with buffer files currently bound in the
