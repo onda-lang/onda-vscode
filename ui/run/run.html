@@ -2183,6 +2183,7 @@
       const { bindDraggableNumber, numberInputValue } = globalThis.__ONDA_NUMBER_INPUT__;
       const state = {
         running: false,
+        processingRequested: false,
         connected: false,
         path: "",
         status: "Stopped",
@@ -4474,6 +4475,22 @@
 
       }
 
+      function renderTransport() {
+        const supportsTransport = state.supportsTransport === true;
+        const canStop = state.running || state.processingRequested === true;
+        heroControlsNode.classList.toggle("has-transport", supportsTransport);
+        const transportHadFocus = transportNode.contains(document.activeElement);
+        transportNode.hidden = !supportsTransport;
+        startButton.hidden = !supportsTransport || state.running;
+        stopButton.hidden = !supportsTransport || !canStop;
+        startButton.disabled = !state.path || state.running;
+        stopButton.disabled = !canStop;
+        if (transportHadFocus && supportsTransport) {
+          const activeTransport = canStop ? stopButton : startButton;
+          if (!activeTransport.disabled) activeTransport.focus({ preventScroll: true });
+        }
+      }
+
       function render() {
         const logWasAtBottom =
           logOutputNode.scrollHeight - logOutputNode.clientHeight - logOutputNode.scrollTop <= 1;
@@ -4488,7 +4505,6 @@
         }
         const supportsSourceSelection = state.supportsSourceSelection === true;
         const supportsProjectExport = state.supportsProjectExport === true;
-        const supportsTransport = state.supportsTransport === true;
         const supportsDeviceSelection = state.supportsDeviceSelection === true;
         const supportsMidiInput = state.midi?.available === true;
         const supportsRunSettings = state.supportsRunSettings === true;
@@ -4555,17 +4571,7 @@
         settingsPopover.hidden = settingsButton.hidden;
         utilityActionsNode.hidden = settingsButton.hidden && saveProjectButton.hidden && unloadButton.hidden;
         if (runHeaderNode.hidden || settingsButton.hidden) closeDeviceSettings();
-        heroControlsNode.classList.toggle("has-transport", supportsTransport);
-        const transportHadFocus = transportNode.contains(document.activeElement);
-        transportNode.hidden = !supportsTransport;
-        startButton.hidden = !supportsTransport || state.running;
-        stopButton.hidden = !supportsTransport || !state.running;
-        startButton.disabled = !state.path || state.running;
-        stopButton.disabled = !state.running;
-        if (transportHadFocus && supportsTransport) {
-          const activeTransport = state.running ? stopButton : startButton;
-          if (!activeTransport.disabled) activeTransport.focus({ preventScroll: true });
-        }
+        renderTransport();
         renderDeviceOptions(inputDeviceNode, state.inputDevices, state.currentInputDevice, true);
         renderDeviceOptions(outputDeviceNode, state.outputDevices, state.currentOutputDevice, true);
         renderDeviceOptions(

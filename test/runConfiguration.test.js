@@ -8,6 +8,7 @@ const {
 } = require("../out/runConfiguration.js");
 
 const configuration = {
+  host: "webview",
   sampleRateHz: 48_000,
   blockFrames: 256,
   fastMath: false,
@@ -21,8 +22,9 @@ test("run configuration equality requires an active matching process", () => {
   assert.equal(sameRunProcessConfiguration({ ...configuration }, configuration), true);
 });
 
-test("run configuration changes when audio settings, math mode, or devices change", () => {
+test("run configuration changes when the host, audio settings, math mode, or devices change", () => {
   for (const update of [
+    { host: "egui" },
     { sampleRateHz: 96_000 },
     { blockFrames: 512 },
     { fastMath: true },
@@ -50,7 +52,7 @@ test("run panel and Onda process use the configured audio settings", async () =>
       } },
     },
   });
-  assert.equal(panel.messages.at(-1).state.blockSamples, 256);
+  assert.equal(panel.messages.at(-1).state.blockSamples, 512);
 
   await panel.evaluate('runFile("/tmp/audio-settings.onda")');
 
@@ -81,6 +83,7 @@ for (const host of ["webview", "egui"]) {
   test(`${host} runs default to normal math and restart when the math mode changes`, async () => {
     const panel = createMathPanel(host);
     await panel.evaluate('runFile("/tmp/math.onda")');
+    assert.equal(panel.launches.at(-1).includes("--report-sources"), host === "webview");
     assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
     assert.equal(panel.evaluate("runPanelState.fastMath"), false);
 
@@ -136,3 +139,78 @@ test("running another source does not inherit fast math", async () => {
   assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
   assert.equal(panel.messages.at(-1).state.fastMath, false);
 });
+
+for (const host of ["webview", "egui"]) {
+  for (const fastMath of [false, true]) {
+    test(`${host} ${fastMath ? "fast" : "normal"} runs defer audio defaults to Onda`, async () => {
+      const panel = createMathPanel(host);
+      await panel.evaluate(`runFile("/tmp/defaults.onda", { fastMath: ${fastMath} })`);
+      const args = panel.launches.at(-1);
+      assert.equal(args.includes("--sample-rate"), false);
+      assert.equal(args.includes("--block-size"), false);
+      assert.equal(panel.messages.at(-1).state.sampleRateHz, 48_000);
+      assert.equal(panel.messages.at(-1).state.blockSamples, 512);
+    });
+  }
+}
+
+for (const [settings, expectedArgs] of [
+  [{ "run.sampleRate": 48_000 }, ["--sample-rate", "48000"]],
+  [{ "run.blockSize": 512 }, ["--block-size", "512"]],
+  [{ "run.sampleRate": -1, "run.blockSize": 0 }, []],
+]) {
+  test(`only valid explicit audio overrides are passed: ${JSON.stringify(settings)}`, async () => {
+    let args;
+    const panel = createRunPanel(undefined, {
+      settings,
+      modules: { child_process: { spawn(command, launchArgs) {
+        args = launchArgs;
+        return Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(), stderr: new EventEmitter(),
+        });
+      } } },
+    });
+    await panel.evaluate('runFile("/tmp/overrides.onda")');
+    const audioArgs = Array.from(args).flatMap((arg, index) =>
+      ["--sample-rate", "--block-size"].includes(arg) ? [arg, args[index + 1]] : []);
+    assert.deepEqual(audioArgs, expectedArgs);
+  });
+}
+
+for (const outcome of ["success", "failure", "spawn error"]) {
+  test(`Run never automatically reveals Output: ${outcome}`, async () => {
+    let child;
+    const panel = createRunPanel(undefined, {
+      modules: { child_process: { spawn() {
+        child = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(), stderr: new EventEmitter(),
+        });
+        return child;
+      } } },
+    });
+    panel.evaluate(`
+      let outputReveals = 0;
+      let outputText = "";
+      runOutput = {
+        appendLine(text) { outputText += text + "\\n"; },
+        append(text) { outputText += text; },
+        show() { outputReveals += 1; },
+      };
+      vscode.window.showWarningMessage = () => {};
+      showOndaCommandError = async () => {};
+    `);
+    await panel.evaluate('runFile("/tmp/output.onda")');
+    child.stderr.emit("data", Buffer.from("Playing /tmp/output.onda until stopped\n"));
+    assert.equal(panel.evaluate("outputReveals"), 0);
+    assert.match(panel.evaluate("outputText"), /Playing/);
+    if (outcome === "spawn error") {
+      child.emit("error", new Error("spawn failed"));
+    } else {
+      child.emit("exit", outcome === "success" ? 0 : 1, null);
+    }
+    assert.equal(panel.evaluate("outputReveals"), 0);
+    if (outcome !== "success") {
+      assert.ok(panel.messages.at(-1).state.error);
+    }
+  });
+}

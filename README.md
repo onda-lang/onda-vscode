@@ -15,7 +15,7 @@ It provides:
 ## Requirements
 
 - VS Code 1.90 or newer
-- Onda 0.8.31 or newer
+- Onda 0.8.37 or newer
 - an `onda` executable available on `PATH`, or an explicit configured path
 
 ## Install
@@ -57,7 +57,7 @@ You can configure the executable and run host in VS Code settings:
 - `onda.run.host` (`webview` or `egui`)
 - `onda.run.theme` (`auto`, `dark`, or `light`)
 - `onda.run.sampleRate` (default: `48000` Hz)
-- `onda.run.blockSize` (default: `256` frames)
+- `onda.run.blockSize` (default: `512` frames)
 
 Example settings:
 
@@ -66,7 +66,7 @@ Example settings:
   "onda.server.path": "C:/path/to/onda.exe",
   "onda.server.args": [],
   "onda.run.sampleRate": 48000,
-  "onda.run.blockSize": 256
+  "onda.run.blockSize": 512
 }
 ```
 

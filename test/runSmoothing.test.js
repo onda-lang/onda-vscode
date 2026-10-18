@@ -88,7 +88,7 @@ test("excessive offline smoothing retains the previous duration for the next lau
   await panel.evaluate('runFile("/tmp/first.onda")');
   const { args } = panel.launches.at(-1);
   assert.equal(args[args.indexOf("--param-smoothing-ms") + 1], "12.5");
-  assert.equal(panel.state().error, undefined);
+  assert.equal(panel.state().error, null);
 });
 
 test("smoothing rejects the sample-counter boundary offline and live", async () => {
@@ -110,7 +110,7 @@ test("smoothing rejects the sample-counter boundary offline and live", async () 
   panel.reply(panel.requests.at(-1));
   await reset;
   assert.equal(panel.state().paramSmoothingMs, 30);
-  assert.equal(panel.state().error, undefined);
+  assert.equal(panel.state().error, null);
 });
 
 test("offline smoothing uses the configured sample rate, live smoothing uses the launch rate", async () => {
@@ -150,7 +150,7 @@ test("failed smoothing updates restore the last accepted duration", async () => 
   panel.reply(panel.requests.at(-1));
   await reset;
   assert.equal(panel.state().paramSmoothingMs, 30);
-  assert.equal(panel.state().error, undefined);
+  assert.equal(panel.state().error, null);
 });
 
 test("late replies cannot overwrite newer drag updates", async () => {
@@ -163,7 +163,7 @@ test("late replies cannot overwrite newer drag updates", async () => {
   panel.reply(panel.requests[0], "obsolete failure");
   await first;
   assert.equal(panel.state().paramSmoothingMs, 60);
-  assert.equal(panel.state().error, undefined);
+  assert.equal(panel.state().error, null);
 });
 
 test("replies from an ended run do not change the replacement run", async () => {
@@ -174,7 +174,7 @@ test("replies from an ended run do not change the replacement run", async () => 
   await panel.set(15);
   await update;
   assert.equal(panel.state().paramSmoothingMs, 15);
-  assert.equal(panel.state().error, undefined);
+  assert.equal(panel.state().error, null);
 });
 
 test("restarts and file changes launch Onda with the retained smoothing duration", async () => {

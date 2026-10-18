@@ -2,11 +2,21 @@ const fs = require("node:fs");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 const vm = require("node:vm");
+const { afterEach } = require("node:test");
+
+const panels = new Set();
+afterEach(() => {
+  for (const panel of panels) panel.evaluate("disposeRunFileWatcher()");
+  panels.clear();
+});
 
 function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}) {
   const extensionPath = path.join(__dirname, "..", "..", "out", "extension.js");
   const extensionRequire = createRequire(extensionPath);
   const messages = [];
+  const panelReveals = [];
+  const panelCreations = [];
+  const statusMessages = [];
   let receive;
   const webview = {
     cspSource: "test:",
@@ -26,13 +36,23 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
         ViewColumn: { Beside: 2 },
         Uri: { file: (file) => ({ scheme: "file", fsPath: file, toString: () => file }) },
         workspace: { textDocuments: [], getWorkspaceFolder: () => undefined, createFileSystemWatcher: () => ({}), getConfiguration: () => ({
+          inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key] }),
           get: (key, fallback) => ({
             "server.path": "/custom/onda",
             "server.args": ["--custom-option"],
             ...settings,
           })[key] ?? fallback,
         }) },
-        window: { createWebviewPanel: () => ({ webview, onDidDispose() {}, dispose() {}, reveal() {} }) },
+        window: { setStatusBarMessage(text, timeout) {
+          const message = { text, timeout, disposed: false };
+          statusMessages.push(message);
+          return { dispose() { message.disposed = true; } };
+        }, createWebviewPanel: (type, title, showOptions) => {
+          panelCreations.push(showOptions);
+          let dispose;
+          return { webview, onDidDispose(handler) { dispose = handler; }, dispose() { dispose?.(); },
+            reveal(column, preserveFocus) { panelReveals.push({ column, preserveFocus }); } };
+        } },
       };
       if (name === "vscode-languageclient/node") return {
         TransportKind: { stdio: 0 },
@@ -46,7 +66,9 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
     },
   });
   vm.runInContext(fs.readFileSync(extensionPath, "utf8") + "\nextensionContext = { extensionPath: extensionRoot }; client = { initializeResult: { serverInfo: { version: ondaVersion } } }; ensureRunPanel();", context);
-  return { context, messages, receive, evaluate: source => vm.runInContext(source, context) };
+  const panel = { context, messages, panelReveals, panelCreations, statusMessages, receive, evaluate: source => vm.runInContext(source, context) };
+  panels.add(panel);
+  return panel;
 }
 
 

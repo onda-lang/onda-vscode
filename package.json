@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code support for the Onda audio DSL",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -210,13 +210,13 @@
           "type": "integer",
           "minimum": 1,
           "default": 48000,
-          "description": "Sample rate in Hz used by Onda: Run."
+          "description": "Sample rate in Hz used by Onda: Run. Only passed to Onda when explicitly configured."
         },
         "onda.run.blockSize": {
           "type": "integer",
           "minimum": 1,
-          "default": 256,
-          "description": "Compile block size in frames used by Onda: Run."
+          "default": 512,
+          "description": "Compile block size in frames used by Onda: Run. Only passed to Onda when explicitly configured."
         }
       }
     }

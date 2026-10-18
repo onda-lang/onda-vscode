@@ -1,4 +1,5 @@
 export interface RunProcessConfiguration {
+  host: "webview" | "egui";
   sampleRateHz: number;
   blockFrames: number;
   fastMath: boolean;
@@ -12,6 +13,7 @@ export function sameRunProcessConfiguration(
   desired: RunProcessConfiguration,
 ): boolean {
   return active !== undefined &&
+    active.host === desired.host &&
     active.sampleRateHz === desired.sampleRateHz &&
     active.blockFrames === desired.blockFrames &&
     active.fastMath === desired.fastMath &&

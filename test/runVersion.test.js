@@ -23,7 +23,7 @@ test("run panel shows the version of the configured Onda executable", () => {
 test("missing server version leaves the run panel usable", () => {
   const { messages } = createRunPanel(null);
   assert.equal(messages.at(-1).state.status, "Stopped");
-  assert.equal(messages.at(-1).state.error, undefined);
+  assert.equal(messages.at(-1).state.error, null);
   assert.equal(messages.at(-1).state.ondaVersion, undefined);
 });
 

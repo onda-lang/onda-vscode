@@ -137,8 +137,8 @@
         detail.className = "buffer-detail";
         const loaded = document.createElement("div");
         loaded.className = "buffer-file";
-        const isBound = Number.isInteger(Number(buffer.loadedFrames))
-          && Number(buffer.loadedFrames) > 0;
+        const isBound = Boolean(buffer.loadedPath)
+          || (Number.isInteger(Number(buffer.loadedFrames)) && Number(buffer.loadedFrames) > 0);
         loaded.textContent = buffer.loadedPath
           ? bufferFileName(buffer.loadedPath)
           : isBound
