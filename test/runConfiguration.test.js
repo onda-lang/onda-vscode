@@ -8,7 +8,6 @@ const {
 } = require("../out/runConfiguration.js");
 
 const configuration = {
-  host: "webview",
   sampleRateHz: 48_000,
   blockFrames: 256,
   fastMath: false,
@@ -22,9 +21,8 @@ test("run configuration equality requires an active matching process", () => {
   assert.equal(sameRunProcessConfiguration({ ...configuration }, configuration), true);
 });
 
-test("run configuration changes when the host, audio settings, math mode, or devices change", () => {
+test("run configuration changes when the audio settings, math mode, or devices change", () => {
   for (const update of [
-    { host: "egui" },
     { sampleRateHz: 96_000 },
     { blockFrames: 512 },
     { fastMath: true },
@@ -63,10 +61,9 @@ test("run panel and Onda process use the configured audio settings", async () =>
   assert.equal(launchArgs[launchArgs.indexOf("--block-size") + 1], "1024");
 });
 
-function createMathPanel(host = "webview") {
+function createMathPanel() {
   const launches = [];
   const panel = createRunPanel(undefined, {
-    settings: { "run.host": host },
     modules: {
       child_process: { spawn(command, args) {
         launches.push(args);
@@ -79,28 +76,26 @@ function createMathPanel(host = "webview") {
   return { ...panel, launches };
 }
 
-for (const host of ["webview", "egui"]) {
-  test(`${host} runs default to normal math and restart when the math mode changes`, async () => {
-    const panel = createMathPanel(host);
-    await panel.evaluate('runFile("/tmp/math.onda")');
-    assert.equal(panel.launches.at(-1).includes("--report-sources"), host === "webview");
-    assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
-    assert.equal(panel.evaluate("runPanelState.fastMath"), false);
+test(`runs default to normal math and restart when the math mode changes`, async () => {
+  const panel = createMathPanel();
+  await panel.evaluate('runFile("/tmp/math.onda")');
+  assert.equal(panel.launches.at(-1).includes("--report-sources"), true);
+  assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
+  assert.equal(panel.evaluate("runPanelState.fastMath"), false);
 
-    await panel.evaluate('runFile("/tmp/math.onda", { fastMath: true })');
-    assert.equal(panel.launches.length, 2);
-    assert.equal(panel.launches.at(-1).includes("--fast-math"), true);
-    assert.equal(panel.evaluate("runPanelState.fastMath"), true);
+  await panel.evaluate('runFile("/tmp/math.onda", { fastMath: true })');
+  assert.equal(panel.launches.length, 2);
+  assert.equal(panel.launches.at(-1).includes("--fast-math"), true);
+  assert.equal(panel.evaluate("runPanelState.fastMath"), true);
 
-    await panel.evaluate('runFile("/tmp/math.onda", { fastMath: true })');
-    assert.equal(panel.launches.length, 2);
+  await panel.evaluate('runFile("/tmp/math.onda", { fastMath: true })');
+  assert.equal(panel.launches.length, 2);
 
-    await panel.evaluate('runFile("/tmp/math.onda")');
-    assert.equal(panel.launches.length, 3);
-    assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
-    assert.equal(panel.evaluate("runPanelState.fastMath"), false);
-  });
-}
+  await panel.evaluate('runFile("/tmp/math.onda")');
+  assert.equal(panel.launches.length, 3);
+  assert.equal(panel.launches.at(-1).includes("--fast-math"), false);
+  assert.equal(panel.evaluate("runPanelState.fastMath"), false);
+});
 
 test("source saves and device changes preserve the session's fast math mode", async () => {
   const panel = createMathPanel();
@@ -140,18 +135,16 @@ test("running another source does not inherit fast math", async () => {
   assert.equal(panel.messages.at(-1).state.fastMath, false);
 });
 
-for (const host of ["webview", "egui"]) {
-  for (const fastMath of [false, true]) {
-    test(`${host} ${fastMath ? "fast" : "normal"} runs defer audio defaults to Onda`, async () => {
-      const panel = createMathPanel(host);
-      await panel.evaluate(`runFile("/tmp/defaults.onda", { fastMath: ${fastMath} })`);
-      const args = panel.launches.at(-1);
-      assert.equal(args.includes("--sample-rate"), false);
-      assert.equal(args.includes("--block-size"), false);
-      assert.equal(panel.messages.at(-1).state.sampleRateHz, 48_000);
-      assert.equal(panel.messages.at(-1).state.blockSamples, 512);
-    });
-  }
+for (const fastMath of [false, true]) {
+  test(`${fastMath ? "fast" : "normal"} runs defer audio defaults to Onda`, async () => {
+    const panel = createMathPanel();
+    await panel.evaluate(`runFile("/tmp/defaults.onda", { fastMath: ${fastMath} })`);
+    const args = panel.launches.at(-1);
+    assert.equal(args.includes("--sample-rate"), false);
+    assert.equal(args.includes("--block-size"), false);
+    assert.equal(panel.messages.at(-1).state.sampleRateHz, 48_000);
+    assert.equal(panel.messages.at(-1).state.blockSamples, 512);
+  });
 }
 
 for (const [settings, expectedArgs] of [

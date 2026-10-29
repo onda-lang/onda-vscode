@@ -197,7 +197,7 @@ let scopeColumns = 348;
 let scopeViewVisible = true;
 let runSchemaReady = false;
 const SCOPE_MAX_FRAMES = 1024;
-const SCOPE_POLL_INTERVAL_MS = 50;
+const SCOPE_POLL_INTERVAL_MS = 1000 / 30;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
 const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
 const DEFAULT_RUN_BLOCK_FRAMES = 512;
@@ -324,13 +324,10 @@ async function runFile(
     preservedRunBufferBindings.clear();
     runSourceFiles = new Set([path.resolve(fsPath)]);
   }
-  const runHost = ondaRunHostSetting();
-  const runTheme = ondaRunThemeSetting();
   const { sampleRateHz, blockFrames, args: audioArgs } = ondaRunAudioSettings();
   const fastMath = options?.fastMath ?? false;
   const preserveFocus = options?.preserveFocus ?? false;
   const desiredRunConfiguration: RunProcessConfiguration = {
-    host: runHost,
     sampleRateHz,
     blockFrames,
     fastMath,
@@ -339,28 +336,16 @@ async function runFile(
     midiInputDevice: runPanelState.currentMidiInputDevice,
   };
 
-  if (runHost !== "egui") {
-    ensureRunPanel(preserveFocus);
-  } else {
-    disposeRunFileWatcher();
-    if (runPanel) {
-      const panel = runPanel;
-      runPanel = undefined;
-      runPanelReady = false;
-      panel.dispose();
-    }
-  }
+  ensureRunPanel(preserveFocus);
   if (
     runProcess &&
     runPath === fsPath &&
     !options?.restart && !saved &&
     sameRunProcessConfiguration(activeRunConfiguration, desiredRunConfiguration)
   ) {
-    if (runHost !== "egui") {
-      revealRunPanel(preserveFocus);
-      if (runPanelState.connected && !runProcessingRequested) {
-        await playRunProcessing();
-      }
+    revealRunPanel(preserveFocus);
+    if (runPanelState.connected && !runProcessingRequested) {
+      await playRunProcessing();
     }
     return;
   }
@@ -408,10 +393,7 @@ async function runFile(
   };
 
   const { command, extraArgs } = ondaExecutableConfig();
-  const args =
-    runHost === "egui"
-      ? [...extraArgs, "run", fsPath, "--theme", runTheme]
-      : [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources"];
+  const args = [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources"];
   args.push(
     ...audioArgs,
     "--param-smoothing-ms",
@@ -448,19 +430,13 @@ async function runFile(
   let runStderrBuffer = "";
 
   runOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
-  if (runHost !== "egui") {
-    revealRunPanel(preserveFocus);
-  }
+  revealRunPanel(preserveFocus);
 
   child.stdout.on("data", (chunk: Buffer) => {
     if (runProcess !== child) {
       return;
     }
-    if (runHost !== "egui") {
-      handleRunStdout(chunk.toString());
-    } else {
-      runOutput?.append(chunk.toString());
-    }
+    handleRunStdout(chunk.toString());
   });
   child.stderr.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
@@ -729,8 +705,6 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
 async function restartRunForSourceChanges(): Promise<void> {
   const activePath = runPath ?? runPanelState.path;
   if (!activePath) return;
-  // The native host watches its own sources and owns its Play/Stop state.
-  if (runProcess && activeRunConfiguration?.host === "egui") return;
   if (runProcessingRequested) {
     await runFile(activePath, {
       restart: true, fastMath: runPanelState.fastMath, preserveFocus: true, saveInput: false,
@@ -1420,7 +1394,7 @@ function handleRunStdoutLine(line: string): void {
 }
 
 // Merge new param metadata with previously-preserved user values (across restarts).
-// Default value hydration is handled by the webview (run.html).
+// The shared UI owns default-value hydration.
 function mergeRunParams(
   params: RunParamPayload[],
   existing: RunParamState[],
@@ -2214,17 +2188,8 @@ function sendRunControlNotification(command: string, payload?: Record<string, un
   runControlSocket.write(`${request}\n`);
 }
 
-let runPanelUsesGpu = false;
 function ensureRunPanel(preserveFocus = false): void {
-  const usesGpu = ondaRunHostSetting() === "gpu";
   if (runPanel) {
-    if (runPanelUsesGpu !== usesGpu) {
-      runPanelUsesGpu = usesGpu;
-      runPanelReady = false;
-      syncScopeCapture();
-      lastPostedRunState = undefined;
-      runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
-    }
     postRunPanelState();
     return;
   }
@@ -2239,7 +2204,6 @@ function ensureRunPanel(preserveFocus = false): void {
     },
   );
   runPanelReady = false;
-  runPanelUsesGpu = usesGpu;
   const panel = runPanel;
   runPanel.onDidChangeViewState(() => {
     if (runPanel !== panel) return;
@@ -2281,7 +2245,7 @@ function ensureRunPanel(preserveFocus = false): void {
         syncScopeCapture();
         pollScopeData();
         break;
-      case "webviewReady":
+      case "uiReady":
         runPanelReady = true;
         lastPostedRunState = undefined;
         postRunPanelState();
@@ -2366,7 +2330,7 @@ function ensureRunPanel(preserveFocus = false): void {
         break;
     }
   });
-  runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
+  runPanel.webview.html = renderGpuRunHtml(runPanel.webview);
   postRunPanelState();
   if (runPanelState.connected) {
     void Promise.all([
@@ -2446,7 +2410,7 @@ function syncScopeCapture(): boolean {
   const enabled = Boolean(
     scopePollingRequested && runPanelState.running && runPanelState.connected &&
     runPanel && runPanelReady && runPanel.visible !== false &&
-    (!runPanelUsesGpu || scopeViewVisible),
+    scopeViewVisible,
   );
   if (enabled !== scopeCaptureEnabled) {
     sendRunControlNotification("setScopeCaptureEnabled", { value: enabled });
@@ -2455,7 +2419,7 @@ function syncScopeCapture(): boolean {
     scopePollingInFlight = false;
   }
   if (enabled && scopePollingTimer === undefined) {
-    scopePollingTimer = setInterval(pollScopeData, runPanelUsesGpu ? 1000 / 30 : SCOPE_POLL_INTERVAL_MS);
+    scopePollingTimer = setInterval(pollScopeData, SCOPE_POLL_INTERVAL_MS);
   } else if (!enabled && scopePollingTimer !== undefined) {
     clearInterval(scopePollingTimer);
     scopePollingTimer = undefined;
@@ -2470,7 +2434,7 @@ function pollScopeData(): void {
   const epoch = scopePollingEpoch;
   sendRunControlRequest<{ channels?: number; samples?: number[]; packet?: string }>("getScopeData", {
     maxFrames: SCOPE_MAX_FRAMES,
-    ...(runPanelUsesGpu ? { columns: scopeColumns } : {}),
+    columns: scopeColumns,
   })
     .then((result) => {
       if (socket !== runControlSocket || epoch !== scopePollingEpoch) return;
@@ -2494,7 +2458,7 @@ function renderGpuRunHtml(webview: vscode.Webview): string {
   const root = extensionContext?.extensionPath ?? __dirname;
   const htmlPath = path.join(root, "out", "gpu", "index.html");
   if (!fs.existsSync(htmlPath)) {
-    return '<html><body style="font:14px system-ui;color:#dce8f4;background:#07101a;padding:24px">GPU UI assets are missing. Stage the shared UI with npm run stage:gpu, then compile the extension.</body></html>';
+    return '<html><body style="font:14px system-ui;color:#dce8f4;background:#07101a;padding:24px">Onda UI could not be loaded. Reinstall the extension.</body></html>';
   }
   const hostUri = webview.asWebviewUri(vscode.Uri.file(path.join(root, "out", "gpu", "host.js")));
   const csp = `default-src 'none'; script-src ${webview.cspSource} 'wasm-unsafe-eval'; connect-src ${webview.cspSource}; font-src ${webview.cspSource}; style-src 'unsafe-inline'`;
@@ -2504,60 +2468,6 @@ function renderGpuRunHtml(webview: vscode.Webview): string {
     .replace("./host.js", hostUri.toString());
 }
 
-function renderSharedRunHtml(webview: vscode.Webview): string {
-  if (ondaRunHostSetting() === "gpu") return renderGpuRunHtml(webview);
-  const runTheme = ondaRunThemeSetting();
-  const csp = [
-    "default-src 'none'",
-    "img-src data: https:",
-    `style-src ${webview.cspSource} 'unsafe-inline'`,
-    `script-src ${webview.cspSource} 'unsafe-inline'`,
-  ].join("; ");
-
-  // Locate the run HTML.
-  // In a packaged extension it lives at <extensionPath>/out/run.html (copied at build time).
-  // During development it also exists at <extensionPath>/ui/run/run.html.
-  const extRoot = extensionContext?.extensionPath ?? __dirname;
-  const candidates = [
-    path.join(extRoot, "out", "run.html"),
-    path.join(extRoot, "ui", "run", "run.html"),
-  ];
-  let html: string | undefined;
-  let resolvedPath = "";
-  for (const candidate of candidates) {
-    try {
-      html = fs.readFileSync(candidate, "utf-8");
-      resolvedPath = candidate;
-      break;
-    } catch {
-      // Try next candidate.
-    }
-  }
-  if (html === undefined) {
-    return `<!DOCTYPE html><html><body style="color:#e07a7a;padding:20px;font:14px sans-serif">
-      <p>Could not load run UI.</p>
-      <p>Searched:<br/>${candidates.map((c) => `<code>${c}</code>`).join("<br/>")}</p>
-    </body></html>`;
-  }
-
-  for (const asset of ["param-control.js", "buffers.js", "number-input.js"]) {
-    const assetUri = webview.asWebviewUri(
-      vscode.Uri.file(path.join(path.dirname(resolvedPath), asset)),
-    );
-    html = html.replace(`./${asset}`, assetUri.toString());
-  }
-
-  // Inject the VS Code host bridge before the page script runs, and add the CSP header.
-  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${runTheme}" };</script>`;
-  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}" />`;
-
-  // Insert CSP meta after <head> and bridge script before the main <script>.
-  html = html.replace("<head>", `<head>\n    ${cspMeta}`);
-  html = html.replace("<script>", `${bridgeScript}\n    <script>`);
-
-  return html;
-}
-
 function ondaRunThemeSetting(): "auto" | "dark" | "light" {
   const config = vscode.workspace.getConfiguration("onda");
   const value = config.get<string>("run.theme", "auto");
@@ -2565,12 +2475,6 @@ function ondaRunThemeSetting(): "auto" | "dark" | "light" {
     return value;
   }
   return "auto";
-}
-
-function ondaRunHostSetting(): "webview" | "egui" | "gpu" {
-  const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("run.host", "webview");
-  return value === "egui" || value === "gpu" ? value : "webview";
 }
 
 function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number; args: string[] } {

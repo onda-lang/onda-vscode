@@ -93,29 +93,6 @@ test("saving a paused run refreshes metadata without resuming and keeps compile 
   assert.equal(panel.daemonRequests[1].param_smoothing_seconds, 0.03);
 });
 
-test("native Run owns source watching and is not restarted by extension saves", async () => {
-  const panel = createLifecyclePanel({ "run.host": "egui" });
-  await panel.start();
-  await panel.save();
-  assert.equal(panel.launches.length, 1);
-  assert.equal(panel.launches[0].child.killed, undefined);
-});
-
-test("changing run hosts replaces the process without cancelling the new launch", async () => {
-  const settings = { "run.host": "webview" };
-  const panel = createLifecyclePanel(settings);
-  await panel.start();
-  settings["run.host"] = "egui";
-  await panel.start();
-  assert.equal(panel.launches.length, 2);
-  assert.equal(panel.launches[0].child.killed, true);
-  assert.equal(panel.launches[1].args.includes("play"), false);
-  settings["run.host"] = "webview";
-  await panel.start();
-  assert.equal(panel.launches.length, 3);
-  assert.equal(panel.launches[2].args.includes("play"), true);
-});
-
 for (const outcome of ["success", "failure"]) {
   test(`an outdated stopped compile cannot overwrite a newer run: ${outcome}`, async () => {
     const panel = createLifecyclePanel();

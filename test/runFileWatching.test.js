@@ -472,13 +472,7 @@ test("obsolete dependencies and closed or native hosts do not trigger embedded r
   await delay(650);
   assert.equal(panel.launches.length, 2);
 
-  const native = createLifecyclePanel({ "run.host": "egui" });
-  native.context.input = entry;
-  await native.evaluate("runFile(input)");
-  assert.equal(native.evaluate("runFileWatcher"), undefined);
-  fs.writeFileSync(entry, "const value = 3.0\n");
-  await delay(650);
-  assert.equal(native.launches.length, 1);
+
 });
 
 test("watch updates retain in-flight changes and batch a burst of file edits", async t => {

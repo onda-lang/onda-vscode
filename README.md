@@ -9,7 +9,7 @@ It provides:
 - `.onda`, `.on`, and `.ondaproject` filetype detection
 - regex syntax highlighting
 - builtin LSP startup through `onda lsp`
-- `Onda: Run` which launches the embedded webview for a source or project
+- `Onda: Run` which opens the shared GPU run screen for a source or project
 - project creation and source-only project export through `onda project`
 
 ## Requirements
@@ -36,8 +36,8 @@ From the repo root:
 
 ```bash
 npm install
-npm run compile
-npx @vscode/vsce package
+# First run npm run build:gpu-ui in the Onda source checkout.
+npm run package:gpu -- /path/to/onda/ui/gpu
 ```
 
 That produces a `.vsix` file in the repo root, which you can then install like the packaged version.
@@ -50,11 +50,10 @@ By default the extension starts:
 onda lsp
 ```
 
-You can configure the executable and run host in VS Code settings:
+You can configure the executable and playback in VS Code settings:
 
 - `onda.server.path`
 - `onda.server.args`
-- `onda.run.host` (`webview`, `egui`, or experimental `gpu`)
 - `onda.run.theme` (`auto`, `dark`, or `light`)
 - `onda.run.sampleRate` (default: `48000` Hz)
 - `onda.run.blockSize` (default: `512` frames)
@@ -78,17 +77,17 @@ Or on macOS/Linux:
 }
 ```
 
-The sample rate and block size are passed to both the embedded webview and
-native egui run hosts. Changing either setting takes effect the next time you
-run a file.
+The sample rate and block size are passed to the playback process. Changing
+either setting takes effect the next time you run a file.
 
-For the GPU screen, first build `ui/gpu` in the Onda source checkout with
+The panel runs the shared `onda_ui` Rust/wgpu screen as Wasm. It covers
+parameters, input controls, buffers/waveforms, typed events, logs, MIDI, and
+setup, with a collapsible scope. VS Code's webview API supplies the canvas
+container and message transport.
+
+For local development, build `ui/gpu` in the Onda source checkout with
 `npm run build:gpu-ui`, then run `npm run stage:gpu -- /path/to/onda/ui/gpu`
-and `npm run compile` here. Set `onda.run.host` to `gpu`. The same Rust/wgpu
-screen runs as Wasm in the panel and uses the existing playback transport.
-The shared renderer covers parameters, input controls, buffers/waveforms, typed
-events, logs, MIDI, and setup, with a collapsible scope.
-The regular `webview` host remains available. IME composition remains unfinished in the GPU host.
+and `npm run compile` here. Compilation requires the staged GPU assets.
 
 `npm run package:gpu -- /path/to/onda/ui/gpu [output.vsix]` stages the shared
 assets and builds an installable VSIX with the Wasm renderer and font license.
@@ -122,7 +121,7 @@ Available commands:
 starts the run transport, and opens the run UI.
 
 `Onda: Run with Fast Math` enables Onda's `--fast-math` compiler option for that
-run session in either host. Find it in the Command Palette or the file's Explorer
+run session. Find it in the Command Palette or the file's Explorer
 context menu. Fast math allows floating-point optimizations that can change
 numerical results. The run header shows **Fast Math** while enabled. Saving the
 source, changing devices, or using the panel's Play button keeps the session's

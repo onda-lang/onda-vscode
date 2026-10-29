@@ -25,7 +25,7 @@ if (vsix) {
 }
 await mkdir(join(root, 'workspace', '.vscode'), { recursive: true });
 await writeFile(join(root, 'workspace', '.vscode', 'settings.json'), JSON.stringify({
-  'onda.server.path': resolve(binary), 'onda.run.host': 'gpu',
+  'onda.server.path': resolve(binary),
   'onda.run.theme': 'light',
   'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
   'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',

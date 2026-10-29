@@ -114,11 +114,11 @@
       },
       {
         "command": "onda.createProject",
-        "title": "Onda: Create Project…"
+        "title": "Onda: Create Project\u2026"
       },
       {
         "command": "onda.saveAsProject",
-        "title": "Onda: Save as Project…",
+        "title": "Onda: Save as Project\u2026",
         "icon": "$(save-as)"
       },
       {
@@ -196,16 +196,6 @@
           ],
           "default": "auto",
           "description": "Theme used by the Onda run panel."
-        },
-        "onda.run.host": {
-          "type": "string",
-          "enum": [
-            "webview",
-            "egui",
-            "gpu"
-          ],
-          "default": "webview",
-          "description": "Run host: webview, native egui window, or the shared experimental GPU canvas (requires staged assets)."
         },
         "onda.run.sampleRate": {
           "type": "integer",
