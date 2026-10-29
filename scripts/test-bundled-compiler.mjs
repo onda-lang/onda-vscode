@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { compilerTargets, extensionRoot, verifyCompilerBundle } from "./compiler-bundle.mjs";
@@ -9,7 +9,7 @@ const root = resolve(process.argv[2] || extensionRoot);
 const target = `${process.platform}-${process.arch}`;
 const manifest = verifyCompilerBundle(root, target);
 const command = join(root, "compiler", target, "bin", compilerTargets[target].executable);
-const workspace = mkdtempSync(join(tmpdir(), "onda-bundled-smoke-"));
+const workspace = realpathSync(mkdtempSync(join(tmpdir(), "onda-bundled-smoke-")));
 // An absolute bundled executable must work without any Onda installation on PATH.
 const env = { ...process.env, PATH: "", Path: "" };
 

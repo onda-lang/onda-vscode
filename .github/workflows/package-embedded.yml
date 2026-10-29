@@ -88,6 +88,7 @@ jobs:
           name: onda-gpu-ui-${{ steps.version.outputs.version }}
           path: ui/gpu/
           if-no-files-found: error
+          retention-days: 14
 
   package:
     needs: gpu-ui
@@ -174,3 +175,4 @@ jobs:
           name: onda-embedded-${{ matrix.target }}
           path: onda-embedded-${{ matrix.target }}.vsix
           if-no-files-found: error
+          retention-days: 14
