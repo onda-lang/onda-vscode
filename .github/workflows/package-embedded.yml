@@ -42,14 +42,14 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: onda-gpu-ui
-          path: .gpu-ui
+          path: ${{ runner.temp }}/gpu-ui
       - name: Verify and stage unpublished GPU UI
         if: inputs.onda_source_ref != ''
         env:
           ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
         run: |
-          test "$(cat .gpu-ui/onda-source.txt)" = "$ONDA_SOURCE_REF"
-          node ./scripts/stage-gpu-ui.mjs .gpu-ui
+          test "$(cat "$RUNNER_TEMP/gpu-ui/onda-source.txt")" = "$ONDA_SOURCE_REF"
+          node ./scripts/stage-gpu-ui.mjs "$RUNNER_TEMP/gpu-ui"
       - name: Check out matching Onda UI source
         if: inputs.onda_source_ref == ''
         uses: actions/checkout@v5
@@ -125,7 +125,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: onda-${{ matrix.release }}
-          path: .onda-sdk
+          path: ${{ runner.temp }}/onda-sdk
       - name: Select and verify Onda compiler archive
         id: compiler
         shell: bash
@@ -137,9 +137,9 @@ jobs:
           version="$(node ./scripts/onda-version.mjs)"
           name="onda-$version-$RELEASE_TARGET"
           if [[ -n "$ONDA_SOURCE_REF" ]]; then
-            test "$(cat .onda-sdk/onda-source.txt)" = "$ONDA_SOURCE_REF"
-            archive="$GITHUB_WORKSPACE/.onda-sdk/$name.$ARCHIVE_EXTENSION"
-            checksums="$GITHUB_WORKSPACE/.onda-sdk/SHA256SUMS.txt"
+            test "$(cat "$RUNNER_TEMP/onda-sdk/onda-source.txt")" = "$ONDA_SOURCE_REF"
+            archive="$RUNNER_TEMP/onda-sdk/$name.$ARCHIVE_EXTENSION"
+            checksums="$RUNNER_TEMP/onda-sdk/SHA256SUMS.txt"
           else
             archive="$RUNNER_TEMP/$name.$ARCHIVE_EXTENSION"
             checksums="$RUNNER_TEMP/SHA256SUMS.txt"
