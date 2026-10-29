@@ -189,6 +189,13 @@ const pendingRunRequests = new Map<number, PendingControlRequest>();
 const runKillTimers = new Map<number, NodeJS.Timeout>();
 let scopePollingTimer: NodeJS.Timeout | undefined;
 let scopePollingInFlight = false;
+let scopePollingRequested = false;
+let scopePollingEpoch = 0;
+let scopeCaptureSocket: net.Socket | undefined;
+let scopeCaptureEnabled = false;
+let scopeColumns = 348;
+let scopeViewVisible = true;
+let runSchemaReady = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 50;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
@@ -231,6 +238,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   projectOutput = vscode.window.createOutputChannel("Onda Projects");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
   context.subscriptions.push(runOutput, projectOutput, serverOutput);
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
+  }));
 
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.restartLanguageServer", async () => {
@@ -329,7 +339,7 @@ async function runFile(
     midiInputDevice: runPanelState.currentMidiInputDevice,
   };
 
-  if (runHost === "webview") {
+  if (runHost !== "egui") {
     ensureRunPanel(preserveFocus);
   } else {
     disposeRunFileWatcher();
@@ -346,7 +356,7 @@ async function runFile(
     !options?.restart && !saved &&
     sameRunProcessConfiguration(activeRunConfiguration, desiredRunConfiguration)
   ) {
-    if (runHost === "webview") {
+    if (runHost !== "egui") {
       revealRunPanel(preserveFocus);
       if (runPanelState.connected && !runProcessingRequested) {
         await playRunProcessing();
@@ -363,6 +373,7 @@ async function runFile(
   const preservedEvents =
     preserveRunState ? runPanelState.events : [];
   runProcessingRequested = true;
+  runSchemaReady = false;
   runPanelState = {
     ...initialRunLogState(),
     running: false,
@@ -437,7 +448,7 @@ async function runFile(
   let runStderrBuffer = "";
 
   runOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
-  if (runHost === "webview") {
+  if (runHost !== "egui") {
     revealRunPanel(preserveFocus);
   }
 
@@ -445,7 +456,7 @@ async function runFile(
     if (runProcess !== child) {
       return;
     }
-    if (runHost === "webview") {
+    if (runHost !== "egui") {
       handleRunStdout(chunk.toString());
     } else {
       runOutput?.append(chunk.toString());
@@ -579,6 +590,7 @@ async function stopFile(options?: {
   ++runTransportUpdateId;
   if (!runProcess) {
     runProcessingRequested = false;
+    runSchemaReady = true;
     if (!options?.silent) {
       void vscode.window.showInformationMessage("No Onda run is currently running.");
     }
@@ -616,6 +628,7 @@ function clearRunRuntimeState(options?: {
   preservePath?: string;
   preserveProcessingRequested?: boolean;
 }): void {
+  runSchemaReady = true;
   runProcess = undefined;
   runPath = options?.preservePath;
   activeRunConfiguration = undefined;
@@ -1127,6 +1140,7 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
   updateRunFileWatcher();
   runFileWatcher?.acknowledge();
+  runSchemaReady = false;
   try {
     const result = await loadStoppedRunMetadata(fsPath, (graph) => {
       if (requestId === runRequestId) {
@@ -1135,6 +1149,7 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
     });
     if (requestId !== runRequestId) return;
     if (result.sources) updateRunDependencies(fsPath, result.sources);
+    runSchemaReady = true;
     const params = normalizeStoppedRunParams(result.params);
     runPanelState = {
       ...runPanelState,
@@ -1157,6 +1172,7 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
     postRunPanelState();
   } catch (error) {
     if (requestId !== runRequestId) return;
+    runSchemaReady = true;
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
       ...runPanelState,
@@ -1496,6 +1512,8 @@ function connectRunControl(port: number): void {
       refreshRunDevices(),
     ]).then(() => {
       if (runControlSocket !== socket) return;
+      runSchemaReady = true;
+      postRunPanelState();
       reapplyCachedRunParams();
       reapplyCachedRunBuffers();
     });
@@ -1531,6 +1549,7 @@ function connectRunControl(port: number): void {
   });
   socket.on("close", () => {
     if (runControlSocket !== socket) return;
+    runSchemaReady = true;
     stopScopePolling();
     runControlSocket = undefined;
     runControlBuffer = "";
@@ -1863,6 +1882,7 @@ function applyRunParamChange(name: string, value: RunScalarValue): void {
     return;
   }
 
+  postRunParameterValues([param]);
   if (!runPanelState.connected) {
     return;
   }
@@ -1930,6 +1950,18 @@ async function triggerRunEvent(
   }
 }
 
+function postRunParameterValues(params: RunParamState[]): void {
+  if (!runPanel || !runPanelReady || !lastPostedRunState || lastPostedRunState.path !== runPanelState.path) {
+    postRunPanelState();
+    return;
+  }
+  lastPostedRunState.params = runPanelState.params;
+  void runPanel.webview.postMessage({
+    type: "parameterValues",
+    state: { params: params.map(({ name, value }) => ({ name, value })) },
+  });
+}
+
 function resetRunParams(): void {
   clearRunParamDisrun();
   runPanelState = {
@@ -1940,6 +1972,7 @@ function resetRunParams(): void {
       value: runParamDefaultValue(param),
     })),
   };
+  postRunParameterValues(runPanelState.params);
   postRunPanelState();
 
   if (!runPanelState.connected) {
@@ -2181,8 +2214,17 @@ function sendRunControlNotification(command: string, payload?: Record<string, un
   runControlSocket.write(`${request}\n`);
 }
 
+let runPanelUsesGpu = false;
 function ensureRunPanel(preserveFocus = false): void {
+  const usesGpu = ondaRunHostSetting() === "gpu";
   if (runPanel) {
+    if (runPanelUsesGpu !== usesGpu) {
+      runPanelUsesGpu = usesGpu;
+      runPanelReady = false;
+      syncScopeCapture();
+      lastPostedRunState = undefined;
+      runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
+    }
     postRunPanelState();
     return;
   }
@@ -2197,11 +2239,18 @@ function ensureRunPanel(preserveFocus = false): void {
     },
   );
   runPanelReady = false;
+  runPanelUsesGpu = usesGpu;
   const panel = runPanel;
+  runPanel.onDidChangeViewState(() => {
+    if (runPanel !== panel) return;
+    syncScopeCapture();
+    pollScopeData();
+  });
   runPanel.onDidDispose(() => {
     if (runPanel !== panel) return;
     stopScopePolling();
     runPanelReady = false;
+    lastPostedRunState = undefined;
     runPanel = undefined;
     void stopFile({ silent: true });
     clearRunPanelMemory();
@@ -2218,11 +2267,25 @@ function ensureRunPanel(preserveFocus = false): void {
       velocity?: number;
       pressed?: boolean;
       milliseconds?: number;
+      columns?: number;
+      visible?: boolean;
     };
     switch (payload.type) {
+      case "scopeConfig":
+        if (Number.isInteger(payload.columns) && payload.columns! >= 1 && payload.columns! <= 512 && scopeColumns !== payload.columns) {
+          scopeColumns = payload.columns!;
+          ++scopePollingEpoch;
+          scopePollingInFlight = false;
+        }
+        scopeViewVisible = payload.visible !== false;
+        syncScopeCapture();
+        pollScopeData();
+        break;
       case "webviewReady":
         runPanelReady = true;
+        lastPostedRunState = undefined;
         postRunPanelState();
+        syncScopeCapture();
         if (runPanelState.connected) {
           void Promise.all([
             refreshRunParams(),
@@ -2322,75 +2385,127 @@ function revealRunPanel(preserveFocus = false): void {
   runPanel.reveal(runPanel.viewColumn, preserveFocus);
 }
 
+let lastPostedRunState: Record<string, unknown> | undefined;
 function postRunPanelState(options: { resetEventArguments?: boolean } = {}): void {
   if (!runPanel) {
     return;
   }
-  void runPanel.webview.postMessage({
-    type: "state",
-    state: {
-      ...runPanelState,
-      processingRequested: runProcessingRequested,
-      // Undefined fields are omitted when VS Code serializes webview messages.
-      // Send an explicit clear so the view does not retain a previous error.
-      error: runPanelState.error ?? null,
-      ondaVersion: client?.initializeResult?.serverInfo?.version ?? undefined,
-      ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
-      supportsSourceSelection: false,
-      supportsProjectExport: Boolean(
-        runPanelState.path && isOndaSourcePath(runPanelState.path),
-      ),
-      canExportProject: Boolean(
-        runPanelState.path && isOndaSourcePath(runPanelState.path),
-      ),
-      supportsTransport: true,
-      supportsDeviceSelection: true,
-      supportsRunSettings: false,
-      supportsParamSmoothing: true,
-      paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
-      supportsScope: true,
-    },
-  });
+  const state: Record<string, unknown> = {
+    ...runPanelState,
+    processingRequested: runProcessingRequested,
+    schemaReady: runSchemaReady,
+    // Undefined fields are omitted when VS Code serializes webview messages.
+    // Send an explicit clear so the view does not retain a previous error.
+    error: runPanelState.error ?? null,
+    ondaVersion: client?.initializeResult?.serverInfo?.version ?? undefined,
+    ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
+    supportsSourceSelection: false,
+    supportsProjectExport: Boolean(
+      runPanelState.path && isOndaSourcePath(runPanelState.path),
+    ),
+    canExportProject: Boolean(
+      runPanelState.path && isOndaSourcePath(runPanelState.path),
+    ),
+    supportsTransport: true,
+    supportsDeviceSelection: true,
+    supportsMidiInputSelection: true,
+    supportsRunSettings: false,
+    supportsParamSmoothing: true,
+    paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
+    supportsScope: true,
+    themeMode: ondaRunThemeSetting(),
+  };
+  const patch = !lastPostedRunState || !runPanelReady || state.path !== lastPostedRunState.path
+    ? state
+    : Object.fromEntries(Object.entries(state).filter(([key, value]) => !Object.is(value, lastPostedRunState![key])));
+  // Reset is an instruction, so consecutive requests must each cross the bridge.
+  if (options.resetEventArguments) patch.resetEventArguments = true;
+  if (runPanelReady) lastPostedRunState = state;
+  if (Object.keys(patch).length > 0) {
+    void runPanel.webview.postMessage({ type: "state", state: patch });
+  }
 }
 
 function startScopePolling(): void {
-  stopScopePolling();
-  scopePollingTimer = setInterval(pollScopeData, SCOPE_POLL_INTERVAL_MS);
+  scopePollingRequested = true;
+  syncScopeCapture();
 }
 
 function stopScopePolling(): void {
-  if (scopePollingTimer !== undefined) {
+  scopePollingRequested = false;
+  syncScopeCapture();
+}
+
+function syncScopeCapture(): boolean {
+  if (scopeCaptureSocket !== runControlSocket) {
+    scopeCaptureSocket = runControlSocket;
+    scopeCaptureEnabled = false;
+    ++scopePollingEpoch;
+    scopePollingInFlight = false;
+  }
+  const enabled = Boolean(
+    scopePollingRequested && runPanelState.running && runPanelState.connected &&
+    runPanel && runPanelReady && runPanel.visible !== false &&
+    (!runPanelUsesGpu || scopeViewVisible),
+  );
+  if (enabled !== scopeCaptureEnabled) {
+    sendRunControlNotification("setScopeCaptureEnabled", { value: enabled });
+    scopeCaptureEnabled = enabled;
+    ++scopePollingEpoch;
+    scopePollingInFlight = false;
+  }
+  if (enabled && scopePollingTimer === undefined) {
+    scopePollingTimer = setInterval(pollScopeData, runPanelUsesGpu ? 1000 / 30 : SCOPE_POLL_INTERVAL_MS);
+  } else if (!enabled && scopePollingTimer !== undefined) {
     clearInterval(scopePollingTimer);
     scopePollingTimer = undefined;
   }
-  scopePollingInFlight = false;
+  return enabled;
 }
 
 function pollScopeData(): void {
-  if (scopePollingInFlight || !runPanelState.connected || !runPanel || !runPanelReady) {
-    return;
-  }
+  if (!syncScopeCapture() || scopePollingInFlight) return;
   scopePollingInFlight = true;
   const socket = runControlSocket;
-  sendRunControlRequest<{ channels: number; samples: number[] }>("getScopeData", { maxFrames: SCOPE_MAX_FRAMES })
+  const epoch = scopePollingEpoch;
+  sendRunControlRequest<{ channels?: number; samples?: number[]; packet?: string }>("getScopeData", {
+    maxFrames: SCOPE_MAX_FRAMES,
+    ...(runPanelUsesGpu ? { columns: scopeColumns } : {}),
+  })
     .then((result) => {
-      if (socket !== runControlSocket) return;
+      if (socket !== runControlSocket || epoch !== scopePollingEpoch) return;
       scopePollingInFlight = false;
-      if (runPanel && runPanelReady) {
-        void runPanel.webview.postMessage({
+      if (syncScopeCapture()) {
+        void runPanel!.webview.postMessage({
           type: "scopeData",
           channels: result.channels,
           samples: result.samples,
+          packet: result.packet,
         });
       }
     })
     .catch(() => {
-      if (socket !== runControlSocket) return;
+      if (socket !== runControlSocket || epoch !== scopePollingEpoch) return;
       scopePollingInFlight = false;
     });
 }
 
+function renderGpuRunHtml(webview: vscode.Webview): string {
+  const root = extensionContext?.extensionPath ?? __dirname;
+  const htmlPath = path.join(root, "out", "gpu", "index.html");
+  if (!fs.existsSync(htmlPath)) {
+    return '<html><body style="font:14px system-ui;color:#dce8f4;background:#07101a;padding:24px">GPU UI assets are missing. Stage the shared UI with npm run stage:gpu, then compile the extension.</body></html>';
+  }
+  const hostUri = webview.asWebviewUri(vscode.Uri.file(path.join(root, "out", "gpu", "host.js")));
+  const csp = `default-src 'none'; script-src ${webview.cspSource} 'wasm-unsafe-eval'; connect-src ${webview.cspSource}; font-src ${webview.cspSource}; style-src 'unsafe-inline'`;
+  const baseUri = webview.asWebviewUri(vscode.Uri.file(path.join(root, "out", "gpu"))).toString() + "/";
+  return fs.readFileSync(htmlPath, "utf8")
+    .replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}"><base href="${baseUri}">`)
+    .replace("./host.js", hostUri.toString());
+}
+
 function renderSharedRunHtml(webview: vscode.Webview): string {
+  if (ondaRunHostSetting() === "gpu") return renderGpuRunHtml(webview);
   const runTheme = ondaRunThemeSetting();
   const csp = [
     "default-src 'none'",
@@ -2452,10 +2567,10 @@ function ondaRunThemeSetting(): "auto" | "dark" | "light" {
   return "auto";
 }
 
-function ondaRunHostSetting(): "webview" | "egui" {
+function ondaRunHostSetting(): "webview" | "egui" | "gpu" {
   const config = vscode.workspace.getConfiguration("onda");
   const value = config.get<string>("run.host", "webview");
-  return value === "egui" ? "egui" : "webview";
+  return value === "egui" || value === "gpu" ? value : "webview";
 }
 
 function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number; args: string[] } {

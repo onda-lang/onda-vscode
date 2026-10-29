@@ -54,7 +54,7 @@ You can configure the executable and run host in VS Code settings:
 
 - `onda.server.path`
 - `onda.server.args`
-- `onda.run.host` (`webview` or `egui`)
+- `onda.run.host` (`webview`, `egui`, or experimental `gpu`)
 - `onda.run.theme` (`auto`, `dark`, or `light`)
 - `onda.run.sampleRate` (default: `48000` Hz)
 - `onda.run.blockSize` (default: `512` frames)
@@ -81,6 +81,25 @@ Or on macOS/Linux:
 The sample rate and block size are passed to both the embedded webview and
 native egui run hosts. Changing either setting takes effect the next time you
 run a file.
+
+For the GPU screen, first build `ui/gpu` in the Onda source checkout with
+`npm run build:gpu-ui`, then run `npm run stage:gpu -- /path/to/onda/ui/gpu`
+and `npm run compile` here. Set `onda.run.host` to `gpu`. The same Rust/wgpu
+screen runs as Wasm in the panel and uses the existing playback transport.
+The shared renderer covers parameters, input controls, buffers/waveforms, typed
+events, logs, MIDI, and setup, with a collapsible scope.
+The regular `webview` host remains available. IME composition remains unfinished in the GPU host.
+
+`npm run package:gpu -- /path/to/onda/ui/gpu [output.vsix]` stages the shared
+assets and builds an installable VSIX with the Wasm renderer and font license.
+The Onda CLI is configured separately through `onda.server.path`.
+
+`DISPLAY=:1 npm run test:gpu-host -- /path/to/onda [package.vsix]` runs the real
+VS Code extension host and playback process in a temporary profile. With a VSIX,
+it installs and tests that packaged copy. It verifies scope packets, numeric
+editing confirmed by the audio processor, hidden-panel suspension, reopening,
+and source reload. Screenshots and JSON evidence stay in the printed artifact
+directory. Set `VSCODE_BIN` to use another VS Code installation.
 
 The run panel's **Smooth** control adjusts parameter smoothing live. It starts at
 30 ms; set it to 0 to disable smoothing, or double-click to restore 30 ms. The

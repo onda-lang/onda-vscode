@@ -6,7 +6,7 @@ const { afterEach } = require("node:test");
 
 const panels = new Set();
 afterEach(() => {
-  for (const panel of panels) panel.evaluate("disposeRunFileWatcher()");
+  for (const panel of panels) panel.evaluate("disposeRunFileWatcher(); stopScopePolling()");
   panels.clear();
 });
 
@@ -30,6 +30,8 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
     extensionRoot: path.dirname(path.dirname(extensionPath)),
     __dirname: path.dirname(extensionPath),
     process,
+    setInterval,
+    clearInterval,
     require(name) {
       if (name in modules) return modules[name];
       if (name === "vscode") return {
@@ -50,7 +52,8 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
         }, createWebviewPanel: (type, title, showOptions) => {
           panelCreations.push(showOptions);
           let dispose;
-          return { webview, onDidDispose(handler) { dispose = handler; }, dispose() { dispose?.(); },
+          let viewStateChanged;
+          return { webview, onDidChangeViewState(handler) { viewStateChanged = handler; }, setVisible(visible) { this.visible = visible; viewStateChanged?.(); }, onDidDispose(handler) { dispose = handler; }, dispose() { dispose?.(); },
             reveal(column, preserveFocus) { panelReveals.push({ column, preserveFocus }); } };
         } },
       };

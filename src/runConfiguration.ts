@@ -1,5 +1,5 @@
 export interface RunProcessConfiguration {
-  host: "webview" | "egui";
+  host: "webview" | "egui" | "gpu";
   sampleRateHz: number;
   blockFrames: number;
   fastMath: boolean;

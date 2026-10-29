@@ -201,10 +201,11 @@
           "type": "string",
           "enum": [
             "webview",
-            "egui"
+            "egui",
+            "gpu"
           ],
           "default": "webview",
-          "description": "Host used by Onda: Run. 'webview' opens the embedded VS Code panel; 'egui' opens the native egui run window."
+          "description": "Run host: webview, native egui window, or the shared experimental GPU canvas (requires staged assets)."
         },
         "onda.run.sampleRate": {
           "type": "integer",
@@ -223,15 +224,19 @@
   },
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('./out',{recursive:true,force:true})\"",
-    "copy-run-ui": "node -e \"require('fs').cpSync('./ui/run','./out',{recursive:true})\"",
+    "copy-run-ui": "node ./scripts/copy-run-ui.mjs",
     "compile": "npm run clean && tsc -p ./ && npm run copy-run-ui",
     "test": "npm run compile && node --test ./test/*.test.js",
     "vscode:prepublish": "npm run compile",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "stage:gpu": "node ./scripts/stage-gpu-ui.mjs",
+    "test:gpu-host": "node ./scripts/test-gpu-host.mjs",
+    "package:gpu": "node ./scripts/package-gpu.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.5.4"
   },
   "dependencies": {
