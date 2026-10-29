@@ -161,3 +161,13 @@ mode. Use regular `Onda: Run` to return to normal math. No setting is saved.
 `Onda: Create Project…` creates an empty project or packages the active Onda source. `Onda: Save as
 Project…` packages the active or running source together with buffer files currently bound in the
 run panel. Both commands create a new portable project folder through the `onda project` CLI.
+
+## Integration builds without an Onda release
+
+Onda's **Build Onda Releases** workflow can call `package-embedded.yml` with a
+pinned extension commit and unpublished native compiler and GPU UI artifacts
+from the same run. Source revisions, archive checksums, and the pinned Onda
+version are checked before packaging. The existing tests and packaged-compiler
+checks run on Linux x64, Windows x64, and macOS ARM64; the resulting VSIX files
+are downloadable workflow artifacts. Nothing is published to an extension
+registry. Direct manual runs continue to use the published Onda version.
