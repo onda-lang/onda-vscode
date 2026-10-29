@@ -16,3 +16,5 @@ node_modules/**/docs/**
 node_modules/**/*.md
 node_modules/**/*.map
 node_modules/**/*.ts
+.github/**
+.onda-source/**

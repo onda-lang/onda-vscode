@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code support for the Onda audio DSL",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "MIT",
@@ -177,7 +177,8 @@
       "properties": {
         "onda.server.path": {
           "type": "string",
-          "description": "Path to the Onda executable. Leave unset to use 'onda' from PATH."
+          "scope": "machine-overridable",
+          "description": "Path to the external Onda executable when onda.compiler.source is external. Leave unset to use 'onda' from PATH."
         },
         "onda.server.args": {
           "type": "array",
@@ -185,7 +186,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Additional arguments passed before the built-in 'lsp' subcommand."
+          "description": "Additional arguments passed to the selected Onda compiler before each built-in subcommand."
         },
         "onda.run.theme": {
           "type": "string",
@@ -208,6 +209,20 @@
           "minimum": 1,
           "default": 512,
           "description": "Compile block size in frames used by Onda: Run. Only passed to Onda when explicitly configured."
+        },
+        "onda.compiler.source": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "external"
+          ],
+          "enumDescriptions": [
+            "Use the Onda compiler included with this extension.",
+            "Use onda.server.path when configured, otherwise find onda on PATH."
+          ],
+          "default": "bundled",
+          "scope": "machine-overridable",
+          "description": "Compiler used for language services, playback, and project commands. Changing this restarts the language server and stops active playback."
         }
       }
     }
@@ -217,11 +232,15 @@
     "copy-run-ui": "node ./scripts/copy-run-ui.mjs",
     "compile": "npm run clean && tsc -p ./ && npm run copy-run-ui",
     "test": "npm run compile && node --test ./test/*.test.js",
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "node ./scripts/verify-compiler.mjs --packaging && npm run compile",
     "watch": "tsc -watch -p ./",
     "stage:gpu": "node ./scripts/stage-gpu-ui.mjs",
     "test:gpu-host": "node ./scripts/test-gpu-host.mjs",
-    "package:gpu": "node ./scripts/package-gpu.mjs"
+    "package:gpu": "node ./scripts/package-gpu.mjs",
+    "stage:compiler": "node ./scripts/stage-compiler.mjs",
+    "verify:compiler": "node ./scripts/verify-compiler.mjs",
+    "test:compiler": "node ./scripts/test-bundled-compiler.mjs",
+    "package:embedded": "node ./scripts/package-embedded.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
@@ -231,5 +250,8 @@
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
-  }
+  },
+  "extensionKind": [
+    "workspace"
+  ]
 }

@@ -19,6 +19,6 @@ test("missing server version leaves the run panel usable", () => {
 
 test("server initialization updates an already open run panel", async () => {
   const { context, messages } = createRunPanel(null);
-  await vm.runInContext("startClient({ subscriptions: [] })", context);
+  await vm.runInContext("startClient()", context);
   assert.equal(messages.at(-1).state.ondaVersion, "0.8.20");
 });

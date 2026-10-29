@@ -11,12 +11,19 @@ It provides:
 - builtin LSP startup through `onda lsp`
 - `Onda: Run` which opens the shared GPU run screen for a source or project
 - project creation and source-only project export through `onda project`
+- a bundled native Onda compiler for language services, playback, and project commands
 
 ## Requirements
 
 - VS Code 1.90 or newer
-- Onda 0.8.37 or newer
-- an `onda` executable available on `PATH`, or an explicit configured path
+- Linux x64, Windows x64, or macOS Apple Silicon
+
+Platform VSIX packages include the compiler; no separate Onda installation or
+`PATH` configuration is needed. In Remote SSH and other remote workspaces, the
+extension and compiler run on the workspace host, which must use a supported
+platform.
+On Linux, the compiler also requires the system ALSA and PipeWire libraries
+(`libasound.so.2` and `libpipewire-0.3.so.0`).
 
 ## Install
 
@@ -35,33 +42,41 @@ If you already have a packaged `.vsix`, install it with:
 From the repo root:
 
 ```bash
-npm install
-# First run npm run build:gpu-ui in the Onda source checkout.
+npm ci
+# Build ui/gpu with npm run build:gpu-ui in the matching Onda checkout.
+# Download and extract the matching Onda prebuilt release for this host.
+npm run stage:compiler -- /path/to/extracted-onda-release linux-x64
 npm run package:gpu -- /path/to/onda/ui/gpu
 ```
 
-That produces a `.vsix` file in the repo root, which you can then install like the packaged version.
+That produces `onda-gpu.vsix`, including the compiler, GPU renderer, fonts, and
+dependency licenses. Use `win32-x64` on Windows or `darwin-arm64` on Apple Silicon.
+Stage and package each target on a matching host so the executable's version can
+be checked by running it. The VSIX declares its platform and cannot silently
+fall back to an unrelated compiler on `PATH`.
+
+`onda-version` pins both the compiler and GPU UI to Onda 0.9.0. Publish that
+Onda release before running the extension packaging workflow. `ONDA_VERSION`
+can override the pin for local builds. The GPU build records its version and
+asset checksums in `pkg/build.json`; staging and packaging verify that manifest,
+so changing the checkout version alone cannot relabel an old Wasm build.
 
 ## Configuration
 
-By default the extension starts:
+The extension uses its bundled compiler by default. Settings include:
 
-```text
-onda lsp
-```
-
-You can configure the executable and playback in VS Code settings:
-
-- `onda.server.path`
-- `onda.server.args`
+- `onda.compiler.source` (`bundled` or `external`)
+- `onda.server.path` (used only with `external`; unset means `onda` on `PATH`)
+- `onda.server.args` (arguments before every compiler subcommand)
 - `onda.run.theme` (`auto`, `dark`, or `light`)
 - `onda.run.sampleRate` (default: `48000` Hz)
 - `onda.run.blockSize` (default: `512` frames)
 
-Example settings:
+To use a custom compiler:
 
 ```json
 {
+  "onda.compiler.source": "external",
   "onda.server.path": "C:/path/to/onda.exe",
   "onda.server.args": [],
   "onda.run.sampleRate": 48000,
@@ -73,11 +88,13 @@ Or on macOS/Linux:
 
 ```json
 {
+  "onda.compiler.source": "external",
   "onda.server.path": "/path/to/onda"
 }
 ```
 
-The sample rate and block size are passed to the playback process. Changing
+Changing the compiler source, path, or arguments stops playback and restarts the
+language server. The sample rate and block size are passed to the playback process. Changing
 either setting takes effect the next time you run a file.
 
 The panel runs the shared `onda_ui` Rust/wgpu screen as Wasm. It covers
@@ -88,17 +105,31 @@ container and message transport.
 For local development, build `ui/gpu` in the Onda source checkout with
 `npm run build:gpu-ui`, then run `npm run stage:gpu -- /path/to/onda/ui/gpu`
 and `npm run compile` here. Compilation requires the staged GPU assets.
+Use `npm run stage:compiler` for the bundled compiler or select `external` while
+developing. `npm test` checks the extension without requiring a staged compiler.
 
 `npm run package:gpu -- /path/to/onda/ui/gpu [output.vsix]` stages the shared
-assets and builds an installable VSIX with the Wasm renderer and font license.
-The Onda CLI is configured separately through `onda.server.path`.
+assets and packages the staged compiler. Alternatively, with GPU assets already
+staged, `npm run package:embedded -- /path/to/extracted-onda-release <target> [output.vsix]`
+stages the compiler and packages both. Packaging checks the binary
+architecture, checksum, version, required licenses, and GPU UI version.
 
-`DISPLAY=:1 npm run test:gpu-host -- /path/to/onda [package.vsix]` runs the real
+The manual **Package embedded compiler** GitHub Actions workflow builds the GPU
+UI from the pinned Onda tag, runs the extension tests, verifies release archive
+checksums, and produces three platform VSIX artifacts. Each native runner tests
+the compiler extracted from its VSIX with an empty `PATH`. It does not publish extensions.
+
+`npm run test:compiler -- [extension-directory]` checks version, standard-library
+compilation, offline audio rendering, project creation, and LSP startup with an
+empty `PATH`. Pass an extracted VSIX's `extension` directory to test its contents.
+
+`DISPLAY=:1 npm run test:gpu-host -- bundled [package.vsix]` runs the real
 VS Code extension host and playback process in a temporary profile. With a VSIX,
 it installs and tests that packaged copy. It verifies scope packets, numeric
 editing confirmed by the audio processor, hidden-panel suspension, reopening,
 and source reload. Screenshots and JSON evidence stay in the printed artifact
 directory. Set `VSCODE_BIN` to use another VS Code installation.
+Pass an executable path instead of `bundled` to test an external compiler.
 
 The run panel's **Smooth** control adjusts parameter smoothing live. It starts at
 30 ms; set it to 0 to disable smoothing, or double-click to restore 30 ms. The

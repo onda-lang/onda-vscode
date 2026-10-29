@@ -22,6 +22,7 @@ import {
   sameRunProcessConfiguration,
 } from "./runConfiguration";
 import { describeOndaExecutableError } from "./executableError";
+import { OndaCompilerSource, resolveOndaExecutable } from "./ondaExecutable";
 import { mergeRunDependencies, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
 import { RunFileWatcher } from "./runFileWatcher";
 import {
@@ -164,6 +165,9 @@ interface PendingControlRequest {
 }
 
 let client: LanguageClient | undefined;
+let languageFileWatchers: vscode.FileSystemWatcher[] = [];
+let clientRestart: Promise<void> = Promise.resolve();
+let extensionDeactivated = false;
 let extensionContext: vscode.ExtensionContext | undefined;
 let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
@@ -234,12 +238,21 @@ let runPanelState: RunPanelState = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
+  extensionDeactivated = false;
   runOutput = vscode.window.createOutputChannel("Onda Run");
   projectOutput = vscode.window.createOutputChannel("Onda Projects");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
-  context.subscriptions.push(runOutput, projectOutput, serverOutput);
-  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+  languageFileWatchers = [
+    vscode.workspace.createFileSystemWatcher("**/*.onda"),
+    vscode.workspace.createFileSystemWatcher("**/*.on"),
+  ];
+  context.subscriptions.push(runOutput, projectOutput, serverOutput, ...languageFileWatchers);
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (event) => {
     if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
+    if (["onda.compiler.source", "onda.server.path", "onda.server.args"]
+      .some((setting) => event.affectsConfiguration(setting))) {
+      await restartClient();
+    }
   }));
 
   context.subscriptions.push(
@@ -278,10 +291,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  await startClient(context);
+  await restartClient();
 }
 
 export async function deactivate(): Promise<void> {
+  extensionDeactivated = true;
+  await clientRestart;
+  await stopClient();
+}
+
+async function stopClient(): Promise<void> {
   disposeRunFileWatcher();
   await stopFile({ silent: true });
 
@@ -300,12 +319,18 @@ export async function deactivate(): Promise<void> {
   }
 }
 
-async function restartClient(): Promise<void> {
-  await deactivate();
-  if (!extensionContext) {
-    throw new Error("Onda extension context is not initialized");
-  }
-  await startClient(extensionContext);
+function restartClient(): Promise<void> {
+  const restart = clientRestart.then(async () => {
+    if (extensionDeactivated) return;
+    await stopClient();
+    if (extensionDeactivated) return;
+    if (!extensionContext) {
+      throw new Error("Onda extension context is not initialized");
+    }
+    await startClient();
+  });
+  clientRestart = restart.catch(() => {});
+  return restart;
 }
 
 async function runFile(
@@ -392,7 +417,7 @@ async function runFile(
     milliseconds: runPanelState.paramSmoothingMs,
   };
 
-  const { command, extraArgs } = ondaExecutableConfig();
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const args = [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources"];
   args.push(
     ...audioArgs,
@@ -447,7 +472,7 @@ async function runFile(
     if (runProcess !== child) {
       return;
     }
-    const description = describeOndaExecutableError(command, error);
+    const description = describeOndaExecutableError(command, error, source);
     const failedPath = fsPath;
     clearRunRuntimeState({ preservePath: failedPath, preserveProcessingRequested: true });
     runPanelState = {
@@ -463,6 +488,7 @@ async function runFile(
       `Failed to start Onda run${failedPath ? ` (${path.basename(failedPath)})` : ""}`,
       command,
       error,
+      source,
     );
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -794,12 +820,17 @@ async function saveOpenDocument(
   return undefined;
 }
 
-function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
+function ondaExecutableConfig(): { command: string; extraArgs: string[]; source: OndaCompilerSource } {
   const config = vscode.workspace.getConfiguration("onda");
-  const configuredPath = config.get<string>("server.path");
+  const source = config.get<OndaCompilerSource>("compiler.source", "bundled");
   return {
-    command: configuredPath && configuredPath.trim().length > 0 ? configuredPath : "onda",
+    command: resolveOndaExecutable(
+      extensionContext?.extensionPath ?? path.resolve(__dirname, ".."),
+      source,
+      config.get<string>("server.path"),
+    ),
     extraArgs: config.get<string[]>("server.args", []),
+    source,
   };
 }
 
@@ -809,8 +840,9 @@ async function showOndaCommandError(
   context: string,
   command: string,
   error: unknown,
+  source: OndaCompilerSource,
 ): Promise<void> {
-  const description = describeOndaExecutableError(command, error);
+  const description = describeOndaExecutableError(command, error, source);
   const message = `${context}: ${description.message}`;
   if (!description.canConfigure) {
     await vscode.window.showErrorMessage(message);
@@ -821,7 +853,7 @@ async function showOndaCommandError(
   if (action === CONFIGURE_EXECUTABLE_ACTION) {
     await vscode.commands.executeCommand(
       "workbench.action.openSettings",
-      "onda.server.path",
+      source === "bundled" ? "onda.compiler.source" : "onda.server.path",
     );
   }
 }
@@ -1019,7 +1051,7 @@ async function executeProjectCommand(
   cwd: string,
   title: string,
 ): Promise<boolean> {
-  const { command, extraArgs } = ondaExecutableConfig();
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const args = [...extraArgs, ...commandArgs];
   projectOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
   try {
@@ -1030,7 +1062,7 @@ async function executeProjectCommand(
     return true;
   } catch (error) {
     projectOutput?.show(true);
-    await showOndaCommandError("Onda project command failed", command, error);
+    await showOndaCommandError("Onda project command failed", command, error, source);
     return false;
   }
 }
@@ -1183,7 +1215,7 @@ async function loadStoppedRunMetadata(
   fsPath: string,
   onSources?: (graph: unknown) => void,
 ): Promise<RunStoppedMetadata> {
-  const { command, extraArgs } = ondaExecutableConfig();
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
   const fastMath = runPanelState.fastMath;
   const paramSmoothingSeconds = runPanelState.paramSmoothingMs / 1000;
@@ -1290,7 +1322,7 @@ async function loadStoppedRunMetadata(
     });
 
     child.once("error", (error: Error) => {
-      fail(describeOndaExecutableError(command, error).message);
+      fail(describeOndaExecutableError(command, error, source).message);
     });
 
     child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -2514,15 +2546,9 @@ function explicitPositiveIntegerSetting(
     : undefined;
 }
 
-async function startClient(context: vscode.ExtensionContext): Promise<void> {
-  const { command, extraArgs } = ondaExecutableConfig();
+async function startClient(): Promise<void> {
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const args = [...extraArgs, "lsp"];
-  const fileWatchers = [
-    vscode.workspace.createFileSystemWatcher("**/*.onda"),
-    vscode.workspace.createFileSystemWatcher("**/*.on"),
-  ];
-  context.subscriptions.push(...fileWatchers);
-
   const serverOptions: ServerOptions = {
     run: {
       command,
@@ -2539,7 +2565,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "onda" }],
     synchronize: {
-      fileEvents: fileWatchers,
+      fileEvents: languageFileWatchers,
     },
     outputChannel: serverOutput,
     traceOutputChannel: serverOutput,
@@ -2551,8 +2577,10 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     postRunPanelState();
   } catch (error) {
     client = undefined;
-    const description = describeOndaExecutableError(command, error);
+    const description = describeOndaExecutableError(command, error, source);
     serverOutput?.appendLine(`Failed to start: ${description.message}`);
-    await showOndaCommandError("Onda language server could not start", command, error);
+    // A notification can stay open indefinitely; it must not hold the restart queue.
+    void showOndaCommandError("Onda language server could not start", command, error, source)
+      .catch((notificationError) => serverOutput?.appendLine(`Failed to show compiler error: ${notificationError}`));
   }
 }

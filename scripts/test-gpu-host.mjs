@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const extension = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const binary = process.argv[2];
 const vsix = process.argv[3];
-assert.ok(binary, 'Usage: npm run test:gpu-host -- /path/to/onda [package.vsix]');
+assert.ok(binary, 'Usage: npm run test:gpu-host -- <bundled|/path/to/onda> [package.vsix]');
 const root = await mkdtemp(join(tmpdir(), 'onda-vscode-gpu-'));
 let developmentPath = extension;
 if (vsix) {
@@ -25,7 +25,8 @@ if (vsix) {
 }
 await mkdir(join(root, 'workspace', '.vscode'), { recursive: true });
 await writeFile(join(root, 'workspace', '.vscode', 'settings.json'), JSON.stringify({
-  'onda.server.path': resolve(binary),
+  'onda.compiler.source': binary === 'bundled' ? 'bundled' : 'external',
+  ...(binary === 'bundled' ? {} : { 'onda.server.path': resolve(binary) }),
   'onda.run.theme': 'light',
   'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
   'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',

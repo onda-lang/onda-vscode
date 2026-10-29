@@ -40,6 +40,7 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
         workspace: { textDocuments: [], getWorkspaceFolder: () => undefined, createFileSystemWatcher: () => ({}), getConfiguration: () => ({
           inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key] }),
           get: (key, fallback) => ({
+            "compiler.source": "external",
             "server.path": "/custom/onda",
             "server.args": ["--custom-option"],
             ...settings,
