@@ -118,6 +118,21 @@ try {
   const frameId = tree.frameTree.childFrames[0].frame.id;
   page.canvasContext = page.contexts.find(c => c.auxData?.isDefault && c.auxData?.frameId === frameId)?.id;
   assert.ok(page.canvasContext, 'Canvas execution context must exist');
+  const sizeBeforeResize = await page.canvas(`[document.querySelector('canvas').width,document.querySelector('canvas').height]`);
+  await page.canvas(`window.originalRAF=requestAnimationFrame;window.delayedFrames=[];
+    window.requestAnimationFrame=cb=>(delayedFrames.push(cb),10000+delayedFrames.length)`);
+  await page.evaluate(`document.querySelector('iframe').style.width='65%'`);
+  await until(() => page.canvas(`delayedFrames.length>0 &&
+    Math.round(document.querySelector('canvas').clientWidth*devicePixelRatio)!==${sizeBeforeResize[0]}`), 'webview resize before drawing');
+  assert.deepEqual(await page.canvas(`[document.querySelector('canvas').width,document.querySelector('canvas').height]`),
+    sizeBeforeResize, 'Resizing the webview must retain its previous backing store until drawing');
+  await page.canvas(`window.requestAnimationFrame=originalRAF;
+    for(const callback of delayedFrames)originalRAF(callback);
+    new Promise(r=>originalRAF(()=>originalRAF(r)))`);
+  assert.equal(await page.canvas(`document.querySelector('canvas').width===Math.round(document.querySelector('canvas').clientWidth*devicePixelRatio)`),
+    true, 'The replacement frame must use the resized webview dimensions');
+  await page.evaluate(`document.querySelector('iframe').style.width=''`);
+  await page.canvas('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
   await page.canvas(`(async () => {
     const { CanvasUi } = await import(new URL('./pkg/onda_ui.js', document.querySelector('script[src]').src));
     window.probe = { packets: 0, messages: [], inputs: [], commands: [] };
@@ -140,7 +155,26 @@ try {
   // handshake for a fresh snapshot before asserting advertised capabilities.
   await page.canvas(`window.dispatchEvent(new MessageEvent('message', {data:{type:'requestRunViewReady'}}))`);
   await until(() => page.canvas('probe.messages.some(m => m.state?.supportsMidiInputSelection === true)'), 'initial capabilities');
-  await until(() => page.canvas('probe.packets >= 10'), 'live compact scope data');
+  await until(() => page.canvas('probe.packets >= 3'), 'scope pinned by default');
+  const clickScopeHeader = async () => {
+    const point = await page.evaluate(`(() => {
+      const frame=document.querySelector('iframe'), outer=frame.getBoundingClientRect();
+      const canvas=frame.contentDocument.querySelector('canvas').getBoundingClientRect();
+      return {x:outer.left+canvas.left+40,y:outer.top+canvas.top+100};
+    })()`);
+    for (const type of ['mousePressed','mouseReleased'])
+      await page.call('Input.dispatchMouseEvent', {type,...point,button:'left',clickCount:1});
+  };
+  await clickScopeHeader();
+  await until(() => page.canvas("probe.commands.findLast(c=>c.type==='viewState')?.state.sections.scope===false"), 'collapsed scope');
+  await delay(150);
+  const collapsedPackets = await page.canvas('probe.packets');
+  const meterFrames = await page.canvas("probe.messages.filter(m=>m.type==='meterData').length");
+  await until(() => page.canvas(`probe.messages.filter(m=>m.type==='meterData').length>=${meterFrames + 3}`), 'live compact meters');
+  assert.equal(await page.canvas('probe.packets'), collapsedPackets, 'collapsed scope must not transport waveform data');
+  assert.ok(await page.canvas("probe.messages.findLast(m=>m.type==='meterData').peaks.length===probe.messages.findLast(m=>m.type==='meterData').channels"));
+  await clickScopeHeader();
+  await until(() => page.canvas(`probe.packets >= ${collapsedPackets + 10}`), 'expanded live scope data');
   assert.equal(await page.canvas('document.documentElement.dataset.theme'), 'light', 'Explicit light theme must reach the canvas');
   await host('theme:dark');
   await until(() => page.canvas('document.documentElement.dataset.theme === "dark"'), 'live theme preference');
@@ -196,7 +230,7 @@ try {
   await until(() => page.canvas(`probe.messages.some(m => m.type==='state' && m.state?.params?.some(p=>p.name==='freq' && p.value===220))`), 'source reload');
   assert.equal(await page.canvas('document.querySelector("#status").hidden'), true, 'Renderer must remain healthy');
   await writeFile(join(root, 'result.json'), JSON.stringify({ passed: true, scope, extension: developmentPath, vsix: vsix ? resolve(vsix) : null,
-    checks: ['real extension host', 'real playback', 'compact scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'explicit and automatic theme changes', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
+    checks: ['real extension host', 'real playback', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'explicit and automatic theme changes', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
   await host('done');
   page.socket.close();
   const [code] = await ended;

@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vitreo12/onda.git"
+    "url": "https://github.com/onda-lang/onda-vscode.git"
   },
   "engines": {
     "vscode": "^1.90.0"
@@ -245,7 +245,8 @@
   "devDependencies": {
     "@types/node": "^20.19.39",
     "@types/vscode": "^1.90.0",
-    "@vscode/vsce": "^4.0.0",
+    "@vscode/vsce": "^4.1.0",
+    "ovsx": "^1.3.0",
     "typescript": "^5.5.4"
   },
   "dependencies": {

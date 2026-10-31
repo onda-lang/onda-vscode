@@ -19,7 +19,7 @@ test("GPU scopes target 30 Hz", () => {
     setInterval=(_fn,ms)=>{intervals.push(ms);return 1;};clearInterval=()=>{};
     runPanelState.running=true;runPanelState.connected=true;runPanelReady=true;
     sendRunControlNotification=()=>{};
-    startScopePolling();stopScopePolling();`);
+    scopeViewVisible=true;startScopePolling();stopScopePolling();`);
   assert.equal(panel.evaluate("intervals[0]"), 1000 / 30);
 });
 
@@ -96,7 +96,7 @@ test("GPU scope hide/show rejects old replies without releasing a newer request"
     runControlSocket={};runPanelState.running=true;runPanelState.connected=true;runPanelReady=true;
     sendRunControlNotification=(command,payload)=>notifications.push({command,...payload});
     sendRunControlRequest=()=>new Promise(resolve=>requests.push(resolve));
-    startScopePolling();pollScopeData();`);
+    scopeViewVisible=true;startScopePolling();pollScopeData();`);
   await panel.receive({type:"scopeConfig",columns:128,visible:false});
   await panel.receive({type:"scopeConfig",columns:128,visible:true});
   const before = panel.messages.filter(m => m.type === "scopeData").length;
@@ -109,9 +109,9 @@ test("GPU scope hide/show rejects old replies without releasing a newer request"
   assert.equal(panel.messages.at(-1).packet, "new");
   panel.evaluate("runPanel.setVisible(false)");
   assert.equal(panel.evaluate("scopePollingTimer"), undefined);
-  assert.equal(panel.evaluate("notifications.at(-1).value"), false);
+  assert.equal(panel.evaluate("notifications.at(-1).value"), "off");
   panel.evaluate("runPanel.setVisible(true)");
-  assert.equal(panel.evaluate("notifications.at(-1).value"), true);
+  assert.equal(panel.evaluate("notifications.at(-1).value"), "waveform");
 });
 
 test("GPU runtime and log updates omit unchanged control banks and readiness resends them", async () => {
@@ -145,4 +145,30 @@ test("GPU publications preserve consecutive explicit event resets", () => {
   panel.evaluate(`postRunPanelState({resetEventArguments:true})`);
   assert.equal(panel.messages.length, before + 1);
   assert.deepEqual(JSON.parse(JSON.stringify(panel.messages.at(-1).state)), {resetEventArguments:true});
+});
+
+
+test("meters and scopes share one 30 Hz publication stream", async () => {
+  const panel = createRunPanel();
+  panel.evaluate(`globalThis.intervals=[];globalThis.notifications=[];
+    setInterval=(_fn,ms)=>{intervals.push(ms);return 1;};clearInterval=()=>{};
+    runControlSocket={};runPanelState.running=true;runPanelState.connected=true;runPanelReady=true;
+    sendRunControlNotification=(command,payload)=>notifications.push({command,...payload});
+    sendRunControlRequest=async()=>({channels:64,peaks:Array.from({length:64},(_,i)=>i/64)});startScopePolling();`);
+  await panel.receive({type:"scopeConfig",columns:128,visible:false,meter:true});
+  assert.equal(panel.evaluate("intervals.at(-1)"), 1000/30);
+  assert.equal(panel.evaluate("notifications.at(-1).value"), "meter");
+  assert.equal(panel.messages.at(-1).type, "scopeData");
+  assert.equal(panel.messages.at(-1).channels, 64);
+  assert.deepEqual(Array.from(panel.messages.at(-1).peaks), Array.from({length:64},(_,i)=>i/64));
+  assert.equal(panel.messages.at(-1).packet, undefined);
+  assert.equal(panel.messages.at(-1).samples, undefined);
+  const before = panel.messages.length;
+  panel.evaluate(`sendRunControlRequest=async()=>({channels:2,peaks:[0.5,1.2],packet:'waveform'});`);
+  await panel.receive({type:"scopeConfig",columns:128,visible:true,meter:true});
+  assert.equal(panel.evaluate("intervals.at(-1)"), 1000/30);
+  assert.equal(panel.evaluate("notifications.at(-1).value"), "waveform");
+  assert.equal(panel.messages.length, before + 1);
+  assert.equal(panel.messages.at(-1).packet, "waveform");
+  assert.deepEqual(Array.from(panel.messages.at(-1).peaks), [0.5,1.2]);
 });

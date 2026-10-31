@@ -1,0 +1,99 @@
+name: Publish extension
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-extension
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Validate release version
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) {
+            throw new Error('Release version must be a stable major.minor.patch version');
+          }
+          if (manifest.version !== lock.version || manifest.version !== lock.packages[''].version) {
+            throw new Error('package.json and package-lock.json versions must match');
+          }
+          if (process.env.RELEASE_EVENT === 'push' &&
+              ![manifest.version, `v${manifest.version}`].includes(process.env.RELEASE_TAG)) {
+            throw new Error(`Release tag must match extension version ${manifest.version}`);
+          }
+          NODE
+
+  package:
+    needs: validate
+    uses: ./.github/workflows/package-embedded.yml
+    with:
+      source_ref: ${{ github.sha }}
+      onda_source_ref: ""
+
+  marketplace:
+    name: Publish to VS Code Marketplace
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: onda-embedded-*
+          path: dist
+          merge-multiple: true
+      - name: Publish tested VSIXs with trusted publishing
+        run: npx --no-install vsce publish --oidc --skip-duplicate --packagePath dist/*.vsix
+
+  open-vsx:
+    name: Publish to Open VSX
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: onda-embedded-*
+          path: dist
+          merge-multiple: true
+      - name: Publish tested VSIXs
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [[ -z "$OVSX_PAT" ]]; then
+            echo "Set the OVSX_PAT repository secret to an Open VSX access token." >&2
+            exit 1
+          fi
+          npx --no-install ovsx publish --skip-duplicate --packagePath dist/*.vsix

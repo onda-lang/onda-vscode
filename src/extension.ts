@@ -23,7 +23,7 @@ import {
 } from "./runConfiguration";
 import { describeOndaExecutableError } from "./executableError";
 import { OndaCompilerSource, resolveOndaExecutable } from "./ondaExecutable";
-import { mergeRunDependencies, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
+import { mergeRunDependencies, normalizeRunPath, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
 import { RunFileWatcher } from "./runFileWatcher";
 import {
   COMPUTER_KEYBOARD_MIDI_INPUT,
@@ -172,6 +172,7 @@ let extensionContext: vscode.ExtensionContext | undefined;
 let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
 let activeRunConfiguration: RunProcessConfiguration | undefined;
+let runAudioOverrides: { sampleRateHz?: number; blockFrames?: number } = {};
 let runProcessingRequested = false;
 let runRequestId = 0;
 let runTransportUpdateId = 0;
@@ -196,9 +197,10 @@ let scopePollingInFlight = false;
 let scopePollingRequested = false;
 let scopePollingEpoch = 0;
 let scopeCaptureSocket: net.Socket | undefined;
-let scopeCaptureEnabled = false;
+let scopeCaptureMode: "off" | "meter" | "waveform" = "off";
 let scopeColumns = 348;
-let scopeViewVisible = true;
+let scopeViewVisible = false;
+let scopeMeterVisible = false;
 let runSchemaReady = false;
 const SCOPE_MAX_FRAMES = 1024;
 const SCOPE_POLL_INTERVAL_MS = 1000 / 30;
@@ -249,6 +251,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(runOutput, projectOutput, serverOutput, ...languageFileWatchers);
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (event) => {
     if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
+    if (event.affectsConfiguration("onda.run.sampleRate")) delete runAudioOverrides.sampleRateHz;
+    if (event.affectsConfiguration("onda.run.blockSize")) delete runAudioOverrides.blockFrames;
     if (["onda.compiler.source", "onda.server.path", "onda.server.args"]
       .some((setting) => event.affectsConfiguration(setting))) {
       await restartClient();
@@ -720,8 +724,8 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
   if (!activePath) {
     return;
   }
-  if (path.resolve(document.uri.fsPath) !== path.resolve(activePath)
-    && !runSourceFiles.has(path.resolve(document.uri.fsPath))) {
+  if (normalizeRunPath(document.uri.fsPath) !== normalizeRunPath(activePath)
+    && !runSourceFiles.has(normalizeRunPath(document.uri.fsPath))) {
     return;
   }
   if (runFileWatcher?.isCurrent(document.uri.fsPath)) return;
@@ -746,7 +750,9 @@ function updateRunFileWatcher(): void {
     void restartRunForSourceChanges().catch((error) => {
       runOutput?.appendLine(`Failed to reload Onda run: ${String(error)}`);
     });
-  }, () => runInputSaves.size > 0);
+  }, () => runInputSaves.size > 0, (file, error) => {
+    runOutput?.appendLine(`Could not validate Onda source ${file}: ${String(error)}; retrying.`);
+  });
   runFileWatcher.update(runSourceFiles);
 }
 
@@ -2115,6 +2121,21 @@ function normalizeDeviceSelection(name: string | null | undefined): string | nul
   return trimmed.length > 0 ? trimmed : null;
 }
 
+async function updateRunSettings(sampleRateHz: unknown, blockSamples: unknown): Promise<void> {
+  if (typeof sampleRateHz !== "number" || !Number.isInteger(sampleRateHz)
+    || sampleRateHz < 1 || sampleRateHz > 768000
+    || typeof blockSamples !== "number" || !Number.isInteger(blockSamples)
+    || blockSamples < 1 || blockSamples > 65536) return;
+  if (sampleRateHz === runPanelState.sampleRateHz && blockSamples === runPanelState.blockSamples) return;
+  runAudioOverrides = { sampleRateHz, blockFrames: blockSamples };
+  runPanelState = { ...runPanelState, sampleRateHz, blockSamples };
+  if (runPanelState.path) {
+    await restartRunForSourceChanges();
+  } else {
+    postRunPanelState();
+  }
+}
+
 async function updateRunDeviceSelection(
   kind: "input" | "output" | "midi",
   name: string | null | undefined,
@@ -2265,6 +2286,9 @@ function ensureRunPanel(preserveFocus = false): void {
       milliseconds?: number;
       columns?: number;
       visible?: boolean;
+      meter?: boolean;
+      sampleRateHz?: number;
+      blockSamples?: number;
     };
     switch (payload.type) {
       case "scopeConfig":
@@ -2273,7 +2297,8 @@ function ensureRunPanel(preserveFocus = false): void {
           ++scopePollingEpoch;
           scopePollingInFlight = false;
         }
-        scopeViewVisible = payload.visible !== false;
+        scopeViewVisible = payload.visible === true;
+        scopeMeterVisible = payload.meter === true;
         syncScopeCapture();
         pollScopeData();
         break;
@@ -2320,6 +2345,9 @@ function ensureRunPanel(preserveFocus = false): void {
         break;
       case "setParamSmoothing":
         await updateRunParamSmoothing(payload.milliseconds);
+        break;
+      case "setRunSettings":
+        await updateRunSettings(payload.sampleRateHz, payload.blockSamples);
         break;
       case "triggerEvent":
         if (typeof payload.name === "string") {
@@ -2405,7 +2433,9 @@ function postRunPanelState(options: { resetEventArguments?: boolean } = {}): voi
     supportsTransport: true,
     supportsDeviceSelection: true,
     supportsMidiInputSelection: true,
-    supportsRunSettings: false,
+    supportsRunSettings: true,
+    canSetSampleRate: true,
+    canSetBlockSize: true,
     supportsParamSmoothing: true,
     paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
     supportsScope: true,
@@ -2433,30 +2463,24 @@ function stopScopePolling(): void {
 }
 
 function syncScopeCapture(): boolean {
-  if (scopeCaptureSocket !== runControlSocket) {
-    scopeCaptureSocket = runControlSocket;
-    scopeCaptureEnabled = false;
-    ++scopePollingEpoch;
-    scopePollingInFlight = false;
-  }
-  const enabled = Boolean(
+  const socketChanged = scopeCaptureSocket !== runControlSocket;
+  scopeCaptureSocket = runControlSocket;
+  const active = Boolean(
     scopePollingRequested && runPanelState.running && runPanelState.connected &&
-    runPanel && runPanelReady && runPanel.visible !== false &&
-    scopeViewVisible,
+    runPanel && runPanelReady && runPanel.visible !== false,
   );
-  if (enabled !== scopeCaptureEnabled) {
-    sendRunControlNotification("setScopeCaptureEnabled", { value: enabled });
-    scopeCaptureEnabled = enabled;
+  const mode = !active ? "off" : scopeViewVisible ? "waveform" : scopeMeterVisible ? "meter" : "off";
+  if (socketChanged || mode !== scopeCaptureMode) {
+    sendRunControlNotification("setScopeCaptureMode", { value: mode });
+    scopeCaptureMode = mode;
     ++scopePollingEpoch;
     scopePollingInFlight = false;
+    if (scopePollingTimer !== undefined) clearInterval(scopePollingTimer);
+    scopePollingTimer = mode === "off" ? undefined : setInterval(
+      pollScopeData, SCOPE_POLL_INTERVAL_MS,
+    );
   }
-  if (enabled && scopePollingTimer === undefined) {
-    scopePollingTimer = setInterval(pollScopeData, SCOPE_POLL_INTERVAL_MS);
-  } else if (!enabled && scopePollingTimer !== undefined) {
-    clearInterval(scopePollingTimer);
-    scopePollingTimer = undefined;
-  }
-  return enabled;
+  return mode !== "off";
 }
 
 function pollScopeData(): void {
@@ -2464,7 +2488,7 @@ function pollScopeData(): void {
   scopePollingInFlight = true;
   const socket = runControlSocket;
   const epoch = scopePollingEpoch;
-  sendRunControlRequest<{ channels?: number; samples?: number[]; packet?: string }>("getScopeData", {
+  sendRunControlRequest<{ channels?: number; peaks?: number[]; samples?: number[]; packet?: string }>("getScopeData", {
     maxFrames: SCOPE_MAX_FRAMES,
     columns: scopeColumns,
   })
@@ -2475,8 +2499,9 @@ function pollScopeData(): void {
         void runPanel!.webview.postMessage({
           type: "scopeData",
           channels: result.channels,
-          samples: result.samples,
-          packet: result.packet,
+          peaks: result.peaks,
+          samples: scopeViewVisible ? result.samples : undefined,
+          packet: scopeViewVisible ? result.packet : undefined,
         });
       }
     })
@@ -2511,8 +2536,8 @@ function ondaRunThemeSetting(): "auto" | "dark" | "light" {
 
 function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number; args: string[] } {
   const config = vscode.workspace.getConfiguration("onda");
-  const sampleRate = explicitPositiveIntegerSetting(config, "run.sampleRate");
-  const blockSize = explicitPositiveIntegerSetting(config, "run.blockSize");
+  const sampleRate = runAudioOverrides.sampleRateHz ?? explicitPositiveIntegerSetting(config, "run.sampleRate");
+  const blockSize = runAudioOverrides.blockFrames ?? explicitPositiveIntegerSetting(config, "run.blockSize");
   const args: string[] = [];
   if (sampleRate !== undefined) {
     args.push("--sample-rate", sampleRate.toString());

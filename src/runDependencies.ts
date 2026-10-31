@@ -1,5 +1,16 @@
 import * as path from "path";
 
+/** Translate native compiler paths into the host's filesystem spelling. */
+export function normalizeRunPath(file: string): string {
+  if (process.platform === "win32") {
+    if (/^\\\\\?\\[a-z]:\\/i.test(file)) file = file.slice(4);
+    else if (/^\\\\\?\\UNC\\/i.test(file)) file = `\\\\${file.slice(8)}`;
+    // Drive letters are case-insensitive, including in case-sensitive directories.
+    file = file.replace(/^[a-z]:/i, drive => drive.toUpperCase());
+  }
+  return path.resolve(file);
+}
+
 export interface RunSourceGraph {
   files: string[];
   complete: boolean;
@@ -18,7 +29,9 @@ export function parseRunSourceGraph(graph: unknown): RunSourceGraph | undefined 
       files.includes(file) && (hash === null || (typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)))))) {
     return undefined;
   }
-  return { files, complete, contentHashes };
+  return { files: [...new Set(files.map(normalizeRunPath))], complete,
+    contentHashes: contentHashes === undefined ? undefined
+      : Object.fromEntries(Object.entries(contentHashes).map(([file, hash]) => [normalizeRunPath(file), hash])) };
 }
 
 /** Replace a complete compiler graph, or retain previous files during recovery. */
@@ -31,8 +44,8 @@ export function mergeRunDependencies(
   if (!parsed) return new Set(previous);
   const { files, complete } = parsed;
   return new Set([
-    path.resolve(input),
+    normalizeRunPath(input),
     ...(complete ? [] : previous),
-    ...files.map((file: string) => path.resolve(file)),
+    ...files.map(normalizeRunPath),
   ]);
 }

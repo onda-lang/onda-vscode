@@ -2,6 +2,59 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createLifecyclePanel } = require("./helpers/runLifecycle");
 
+for (const paused of [false, true]) {
+  test(`panel audio settings recompile ${paused ? "paused" : "playing"} runs without changing transport intent`, async () => {
+    const panel = createLifecyclePanel();
+    assert.equal(panel.state().supportsRunSettings, true);
+    assert.equal(panel.state().canSetSampleRate, true);
+    assert.equal(panel.state().canSetBlockSize, true);
+    await panel.evaluate('runFile("/tmp/settings.onda", { fastMath: true })');
+    const socket = panel.connect();
+    if (paused) {
+      const stopping = panel.receive({ type: "stop" });
+      panel.reply(socket, socket.requests.at(-1), {});
+      await stopping;
+    }
+    await panel.receive({ type: "setRunSettings", sampleRateHz: 96000, blockSamples: 1024 });
+    assert.equal(panel.state().sampleRateHz, 96000);
+    assert.equal(panel.state().blockSamples, 1024);
+    assert.equal(panel.state().processingRequested, !paused);
+    assert.equal(panel.state().fastMath, true);
+    const plays = panel.launches.filter(({ args }) => args.includes("play"));
+    assert.equal(plays.length, paused ? 1 : 2);
+    if (paused) {
+      assert.equal(panel.daemonRequests.at(-2).sample_rate_hz, 96000);
+      assert.equal(panel.daemonRequests.at(-2).block_samples, 1024);
+    } else {
+      const args = plays.at(-1).args;
+      assert.equal(args[args.indexOf("--sample-rate") + 1], "96000");
+      assert.equal(args[args.indexOf("--block-size") + 1], "1024");
+    }
+    const launchCount = panel.launches.length;
+    for (const values of [
+      [96000, 1024], [0, 1024], [96000, -1], ["48000", 512],
+      [NaN, 512], [768001, 512], [48000, 65537], [48000.5, 512],
+    ]) {
+      await panel.receive({ type: "setRunSettings", sampleRateHz: values[0], blockSamples: values[1] });
+    }
+    assert.equal(panel.launches.length, launchCount);
+    assert.equal(panel.state().sampleRateHz, 96000);
+    assert.equal(panel.state().blockSamples, 1024);
+  });
+}
+
+test("failed stopped recompilation retains the selected audio settings", async () => {
+  const panel = createLifecyclePanel();
+  panel.evaluate('runPanelState.path = "/tmp/settings.onda"');
+  panel.setDaemonError("Compile failed");
+  await panel.receive({ type: "setRunSettings", sampleRateHz: 96000, blockSamples: 1024 });
+  assert.match(panel.state().error, /Compile failed/);
+  assert.equal(panel.state().sampleRateHz, 96000);
+  assert.equal(panel.state().blockSamples, 1024);
+  assert.equal(panel.state().processingRequested, false);
+  assert.equal(panel.launches.some(({ args }) => args.includes("play")), false);
+});
+
 test("panel Stop cancels recovery after a compile error", async () => {
   const panel = createLifecyclePanel();
   await panel.start();

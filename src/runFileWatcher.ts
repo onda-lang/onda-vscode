@@ -1,9 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
+import { normalizeRunPath } from "./runDependencies";
 
 interface WatchedFile {
   revision: string | undefined;
+  contentHash?: string | null;
   validation?: AbortController;
 }
 
@@ -41,8 +43,10 @@ async function fileContentHash(file: string, signal: AbortSignal): Promise<strin
     const hash = createHash("sha256");
     for await (const chunk of fs.createReadStream(file, { signal })) hash.update(chunk);
     return hash.digest("hex");
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 
@@ -90,20 +94,24 @@ export class RunFileWatcher {
   private refresh: NodeJS.Immediate | undefined;
   private readonly pending = new Set<string>();
   private timer: NodeJS.Timeout | undefined;
+  private readonly validationRetries = new Map<string, string | null>();
+  private validationRetryTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly onChange: () => void,
     private readonly shouldDefer = () => false,
+    private readonly onValidationError: (file: string, error: unknown) => void = () => {},
   ) {}
 
   update(paths: Iterable<string>): void {
-    const next = new Set(Array.from(paths, (file) => path.resolve(file)));
+    const next = new Set(Array.from(paths, normalizeRunPath));
     for (const [file, watched] of this.files) {
       if (next.has(file)) continue;
       watched.validation?.abort();
       this.files.delete(file);
       this.pending.delete(file);
       this.checks.delete(file);
+      this.validationRetries.delete(file);
     }
     for (const file of next) {
       if (this.files.has(file)) continue;
@@ -117,42 +125,62 @@ export class RunFileWatcher {
   /** The next compile consumes this disk state, including changes not yet notified. */
   acknowledge(): void {
     this.cancelPending();
+    this.cancelValidationRetries();
     for (const [file, watched] of this.files) {
       watched.revision = fileRevision(file);
       watched.validation?.abort();
       watched.validation = undefined;
+      // The next compilation supplies a new content baseline.
+      watched.contentHash = undefined;
     }
   }
 
   /** Close the gap between the compiler's reads and filesystem registration. */
   async validate(contentHashes: Record<string, string | null>): Promise<void> {
     const checks = Object.entries(contentHashes).flatMap(([file, expected]) => {
-      file = path.resolve(file);
+      file = normalizeRunPath(file);
       const watched = this.files.get(file);
       if (!watched) return [];
       watched.validation?.abort();
       const validation = new AbortController();
       watched.validation = validation;
+      watched.contentHash = expected;
       return [{ file, expected, watched, validation }];
     });
     // Stream assets one at a time to bound memory and open file descriptors.
     for (const { file, expected, watched, validation } of checks) {
       const current = () => this.files.get(file) === watched && watched.validation === validation;
       if (!current()) continue;
-      const actual = await fileContentHash(file, validation.signal);
-      if (current() && actual !== expected) this.changed(file);
+      let actual: string | null;
+      try {
+        actual = await fileContentHash(file, validation.signal);
+      } catch (error) {
+        if (current() && !validation.signal.aborted) {
+          const report = !this.validationRetries.has(file);
+          this.validationRetries.set(file, expected);
+          this.scheduleValidationRetry();
+          if (report) this.onValidationError(file, error);
+        }
+        continue;
+      }
+      if (!current()) continue;
+      this.validationRetries.delete(file);
+      if (actual !== expected) this.changed(file);
+      else this.pending.delete(file);
     }
   }
 
   isCurrent(file: string): boolean {
-    file = path.resolve(file);
+    file = normalizeRunPath(file);
     const watched = this.files.get(file);
     return watched?.revision !== undefined && !this.pending.has(file)
+      && !this.validationRetries.has(file)
       && watched.revision === fileRevision(file);
   }
 
   dispose(): void {
     this.cancelPending();
+    this.cancelValidationRetries();
     if (this.refresh) clearImmediate(this.refresh);
     this.refresh = undefined;
     if (this.fallbackTimer) clearInterval(this.fallbackTimer);
@@ -238,18 +266,38 @@ export class RunFileWatcher {
       const files = [...this.checks];
       this.checks.clear();
       this.reconcileDirectories();
-      for (const file of files) this.check(file);
+      for (const file of files) this.check(file, true);
     });
     this.refresh.unref();
   }
 
-  private check(file: string): void {
+  private check(file: string, checkContents = false): void {
     const watched = this.files.get(file);
     if (!watched) return;
     const revision = fileRevision(file);
-    if (revision === watched.revision) return;
+    const changed = revision !== watched.revision;
+    if (!changed && !checkContents) return;
     watched.revision = revision;
-    this.changed(file);
+    if (watched.contentHash !== undefined) {
+      void this.validate({ [file]: watched.contentHash });
+    } else if (changed) {
+      this.changed(file);
+    }
+  }
+
+  private scheduleValidationRetry(): void {
+    if (this.validationRetryTimer || this.validationRetries.size === 0) return;
+    this.validationRetryTimer = setTimeout(() => {
+      this.validationRetryTimer = undefined;
+      void this.validate(Object.fromEntries(this.validationRetries));
+    }, 1000);
+    this.validationRetryTimer.unref();
+  }
+
+  private cancelValidationRetries(): void {
+    if (this.validationRetryTimer) clearTimeout(this.validationRetryTimer);
+    this.validationRetryTimer = undefined;
+    this.validationRetries.clear();
   }
 
   private changed(file: string): void {

@@ -232,6 +232,108 @@ test("matching hashes and superseded validations do not restart a newer run", as
   assert.equal(changes, 0);
 });
 
+for (const saveBeforeAcknowledgement of [false, true]) {
+  test(`compiled contents consume queued native save notifications: save before acknowledgement ${saveBeforeAcknowledgement}`, async t => {
+    const { voice } = fixture(t);
+    let changes = 0;
+    let compiling = true;
+    const watcher = new RunFileWatcher(() => changes++, () => compiling);
+    t.after(() => watcher.dispose());
+    watcher.update([voice]);
+    await watcher.validate({ [voice]: contentHash(voice) });
+    const save = () => fs.writeFileSync(voice, "const value = 2.0\n");
+    if (saveBeforeAcknowledgement) save();
+    watcher.acknowledge();
+    if (!saveBeforeAcknowledgement) save();
+    // Let real native notifications arrive while the compiler is running.
+    await delay(150);
+    await watcher.validate({ [voice]: contentHash(voice) });
+    compiling = false;
+    await delay(250);
+    assert.equal(changes, 0, "the new compiled snapshot already includes this save");
+    assert.equal(watcher.isCurrent(voice), true);
+    fs.writeFileSync(voice, "const value = 3.0\n");
+    await waitFor(() => changes === 1);
+  });
+}
+
+test("an edit not consumed by the new compilation still reloads", async t => {
+  const { voice } = fixture(t);
+  let changes = 0;
+  let compiling = true;
+  const watcher = new RunFileWatcher(() => changes++, () => compiling);
+  t.after(() => watcher.dispose());
+  watcher.update([voice]);
+  const compiledHash = contentHash(voice);
+  await watcher.validate({ [voice]: compiledHash });
+  watcher.acknowledge();
+  fs.writeFileSync(voice, "const value = 2.0\n");
+  await delay(150);
+  await watcher.validate({ [voice]: compiledHash });
+  compiling = false;
+  await waitFor(() => changes === 1);
+});
+
+test("a persistent validation read error never becomes a source-change restart loop", async t => {
+  const { voice } = fixture(t);
+  const expected = contentHash(voice);
+  const lstat = fs.promises.lstat;
+  t.mock.method(fs.promises, "lstat", async (file, ...args) => {
+    if (file === voice) throw Object.assign(new Error("EISDIR: lstat 'C:'"), { code: "EISDIR" });
+    return lstat(file, ...args);
+  });
+  let changes = 0;
+  const watcher = new RunFileWatcher(() => changes++);
+  t.after(() => watcher.dispose());
+  watcher.update([voice]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await watcher.validate({ [voice]: expected });
+    await delay(150);
+    watcher.acknowledge();
+  }
+  assert.equal(changes, 0, "a failed observation is not proof that the source changed");
+});
+
+test("validation read errors retry quietly and recover even without a native event", async t => {
+  const { voice } = fixture(t);
+  const expected = contentHash(voice);
+  const lstat = fs.promises.lstat;
+  const watch = fs.watch;
+  let unreadable = true;
+  t.mock.method(fs.promises, "lstat", async (file, ...args) => {
+    if (file === voice && unreadable) throw Object.assign(new Error("temporarily locked"), { code:"EBUSY" });
+    return lstat(file, ...args);
+  });
+  t.mock.method(fs, "watch", (directory, options) => watch(directory, options, () => {}));
+  let changes = 0;
+  let errors = 0;
+  const watcher = new RunFileWatcher(() => changes++, () => false, () => errors++);
+  t.after(() => watcher.dispose());
+  watcher.update([voice]);
+  await watcher.validate({ [voice]: expected });
+  await delay(1150);
+  assert.equal(changes, 0);
+  assert.equal(errors, 1, "report a failed observation once while retrying");
+  unreadable = false;
+  fs.writeFileSync(voice, "const value = 2.0\n");
+  await waitFor(() => changes === 1);
+});
+
+test("metadata changes validate compiled contents before deciding to reload", async t => {
+  const { voice } = fixture(t);
+  let changes = 0;
+  const watcher = new RunFileWatcher(() => changes++);
+  t.after(() => watcher.dispose());
+  watcher.update([voice]);
+  await watcher.validate({ [voice]: contentHash(voice) });
+  const time = fs.statSync(voice).mtimeMs / 1000 + 10;
+  fs.utimesSync(voice, time, time);
+  await delay(250);
+  assert.equal(changes, 0);
+  fs.writeFileSync(voice, "const value = 3.0\n");
+  await waitFor(() => changes === 1);
+});
+
 test("stopped metadata installs the actual compiled dependency graph", async t => {
   const { root, entry, voice } = fixture(t);
   const panel = await startPanel(t, entry, [entry, voice]);
