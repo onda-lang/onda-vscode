@@ -2069,6 +2069,7 @@ async function setRunBufferBinding(
 
 async function chooseRunBufferFile(name: string): Promise<void> {
   const inputPath = runPanelState.path;
+  const requestId = runRequestId;
   const picked = await vscode.window.showOpenDialog({
     canSelectMany: false,
     openLabel: `Bind '${name}' buffer`,
@@ -2077,7 +2078,7 @@ async function chooseRunBufferFile(name: string): Promise<void> {
     },
   });
   const filePath = picked?.[0]?.fsPath;
-  if (!filePath || inputPath !== runPanelState.path) {
+  if (!filePath || requestId !== runRequestId || inputPath !== runPanelState.path) {
     return;
   }
   await bindRunBufferFile(name, filePath);

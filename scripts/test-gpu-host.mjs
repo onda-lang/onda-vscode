@@ -6,17 +6,19 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { vscodeCli } from './vscode-cli.mjs';
 
 const extension = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const binary = process.argv[2];
 const vsix = process.argv[3];
 assert.ok(binary, 'Usage: npm run test:gpu-host -- <bundled|/path/to/onda> [package.vsix]');
+const code = vscodeCli();
 const root = await mkdtemp(join(tmpdir(), 'onda-vscode-gpu-'));
 let developmentPath = extension;
 if (vsix) {
-  const installed = spawnSync(process.env.VSCODE_BIN || 'code', ['--no-sandbox',
+  const installed = spawnSync(code.command, [...code.args, '--no-sandbox',
     `--user-data-dir=${join(root, 'profile')}`, `--extensions-dir=${join(root, 'extensions')}`,
-    '--install-extension', resolve(vsix), '--force'], { stdio: 'inherit' });
+    '--install-extension', resolve(vsix), '--force'], { env: code.env, stdio: 'inherit' });
   if (installed.error) throw installed.error;
   assert.equal(installed.status, 0, 'VSIX installation must succeed');
   const directory = (await readdir(join(root, 'extensions'))).find(name => name.startsWith('onda-lang.onda-vscode-'));
@@ -39,11 +41,11 @@ await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
 const port = listener.address().port;
 await new Promise(resolve => listener.close(resolve));
 let log = '';
-const child = spawn(process.env.VSCODE_BIN || 'code', ['--wait', '--no-sandbox', '--disable-dev-shm-usage',
+const child = spawn(code.command, [...code.args, '--wait', '--no-sandbox', '--disable-dev-shm-usage',
   '--disable-workspace-trust', '--new-window', `--user-data-dir=${join(root, 'profile')}`,
   `--extensions-dir=${join(root, 'extensions')}`, `--extensionDevelopmentPath=${developmentPath}`,
   `--extensionTestsPath=${join(extension, 'test', 'host', 'gpu.js')}`, `--remote-debugging-port=${port}`,
-  join(root, 'workspace')], { env: { ...process.env, ONDA_GPU_HOST_TEST_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'] });
+  join(root, 'workspace')], { env: { ...code.env, ONDA_GPU_HOST_TEST_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'] });
 child.stdout.on('data', chunk => { log = (log + chunk).slice(-16000); });
 child.stderr.on('data', chunk => { log = (log + chunk).slice(-16000); });
 const ended = once(child, 'exit');

@@ -13,6 +13,27 @@ test("GPU state exposes MIDI selection and the configured theme", () => {
   }
 });
 
+test("buffer picking discards results after a source reload or panel replacement", async () => {
+  for (const invalidate of ["runRequestId++", "runPanelState.path='/other.onda'", "runPanel.dispose()"]) {
+    const panel = createRunPanel();
+    panel.evaluate(`runPanelState.path='/original.onda';
+      globalThis.bindings=[];globalThis.finishPicker=undefined;
+      vscode.window.showOpenDialog=()=>new Promise(resolve=>finishPicker=resolve);
+      bindRunBufferFile=async(name,file)=>bindings.push({name,file});`);
+    const selection = panel.evaluate("chooseRunBufferFile('clip')");
+    panel.evaluate(invalidate);
+    panel.evaluate("finishPicker([{fsPath:'/sample.wav'}])");
+    await selection;
+    assert.equal(panel.evaluate("bindings.length"), 0);
+  }
+  const panel = createRunPanel();
+  panel.evaluate(`runPanelState.path='/current.onda';globalThis.bindings=[];
+    vscode.window.showOpenDialog=async()=>[{fsPath:'/sample.wav'}];
+    bindRunBufferFile=async(name,file)=>bindings.push({name,file});`);
+  await panel.evaluate("chooseRunBufferFile('clip')");
+  assert.equal(panel.evaluate("bindings[0].file"), "/sample.wav");
+});
+
 test("GPU scopes target 30 Hz", () => {
   const panel = createRunPanel();
   panel.evaluate(`globalThis.intervals=[];
