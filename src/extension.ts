@@ -175,6 +175,8 @@ let activeRunConfiguration: RunProcessConfiguration | undefined;
 let runAudioOverrides: { sampleRateHz?: number; blockFrames?: number } = {};
 let runProcessingRequested = false;
 let runRequestId = 0;
+// Pending/canceled Run requests do not replace the active event schema.
+let runEngineGeneration = 0;
 let runTransportUpdateId = 0;
 const runInputSaves = new Map<string, number>();
 let runSourceFiles = new Set<string>();
@@ -452,6 +454,7 @@ async function runFile(
     detached: process.platform !== "win32",
   });
 
+  ++runEngineGeneration;
   runProcess = child;
   runPath = fsPath;
   activeRunConfiguration = desiredRunConfiguration;
@@ -1162,6 +1165,7 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
     if (requestId !== runRequestId) return;
     if (result.sources) updateRunDependencies(fsPath, result.sources);
     runSchemaReady = true;
+    ++runEngineGeneration;
     const params = normalizeStoppedRunParams(result.params);
     runPanelState = {
       ...runPanelState,
@@ -2274,12 +2278,14 @@ function ensureRunPanel(preserveFocus = false): void {
     clearRunPanelMemory();
   });
   runPanel.webview.onDidReceiveMessage(async (message: unknown) => {
+    if (runPanel !== panel) return;
     const payload = message as {
       type?: string;
       path?: string;
       name?: string | null;
       value?: RunScalarValue;
       values?: RunEventValue[];
+      engineGeneration?: string | null;
       filePath?: string;
       key?: number;
       velocity?: number;
@@ -2351,7 +2357,8 @@ function ensureRunPanel(preserveFocus = false): void {
         await updateRunSettings(payload.sampleRateHz, payload.blockSamples);
         break;
       case "triggerEvent":
-        if (typeof payload.name === "string") {
+        if (typeof payload.name === "string" && runSchemaReady
+          && payload.engineGeneration === String(runEngineGeneration)) {
           await triggerRunEvent(payload.name, payload.values ?? []);
         }
         break;
@@ -2419,6 +2426,7 @@ function postRunPanelState(options: { resetEventArguments?: boolean } = {}): voi
     ...runPanelState,
     processingRequested: runProcessingRequested,
     schemaReady: runSchemaReady,
+    engineGeneration: String(runEngineGeneration),
     // Undefined fields are omitted when VS Code serializes webview messages.
     // Send an explicit clear so the view does not retain a previous error.
     error: runPanelState.error ?? null,

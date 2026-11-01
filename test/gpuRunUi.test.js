@@ -2,6 +2,79 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const { createRunPanel } = require("./helpers/runPanel");
+const { createLifecyclePanel } = require("./helpers/runLifecycle");
+
+function publishEventSchema(panel) {
+  panel.evaluate(`runSchemaReady=true;
+    runPanelState.events=[{name:'bang',index:0,args:[{name:'level',type:'f64',value:0.25}]}];
+    postRunPanelState();`);
+  return panel.messages.at(-1).state.engineGeneration;
+}
+
+test("GPU events from a replaced engine cannot edit or trigger the current event", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  panel.connect();
+  const previousGeneration = publishEventSchema(panel);
+
+  await panel.evaluate('runFile("/tmp/lifecycle.onda", {restart:true})');
+  const socket = panel.connect();
+  const generation = publishEventSchema(panel);
+  const before = panel.messages.length;
+  for (const engineGeneration of [previousGeneration, undefined, null, "unknown"]) {
+    const stale = panel.receive({type:"triggerEvent",name:"bang",values:[0.9],engineGeneration});
+    const staleRequest = socket.requests.at(-1);
+    if (staleRequest) panel.reply(socket, staleRequest, {});
+    await stale;
+    assert.equal(socket.requests.length, 0);
+    assert.equal(panel.messages.length, before);
+  }
+
+  assert.equal(typeof generation, "string");
+  assert.notEqual(generation, previousGeneration);
+  const current = panel.receive({type:"triggerEvent",name:"bang",values:[0.5],engineGeneration:generation});
+  const request = socket.requests.at(-1);
+  assert.equal(request.command, "triggerEvent");
+  assert.deepEqual(request.values, [0.5]);
+  panel.reply(socket, request, {});
+  await current;
+});
+
+test("reusing an engine after an unchanged Run or canceled save keeps its events valid", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  const generation = publishEventSchema(panel);
+  await panel.start();
+  panel.evaluate(`vscode.window.showErrorMessage=()=>{};
+    vscode.workspace.textDocuments.push({uri:vscode.Uri.file('/tmp/canceled.onda'),isDirty:true,save:async()=>false});`);
+  await panel.evaluate('runFile("/tmp/canceled.onda")');
+  assert.equal(panel.launches.length, 1);
+
+  const current = panel.receive({type:"triggerEvent",name:"bang",values:[0.5],engineGeneration:generation});
+  const request = socket.requests.at(-1);
+  assert.equal(request.command, "triggerEvent");
+  assert.deepEqual(request.values, [0.5]);
+  panel.reply(socket, request, {});
+  await current;
+});
+
+test("recompiled stopped schemas and replaced panels reject their earlier event commands", async () => {
+  const panel = createLifecyclePanel();
+  const previousGeneration = publishEventSchema(panel);
+  await panel.evaluate('refreshStoppedRunMetadata("/tmp/lifecycle.onda")');
+  const generation = panel.messages.at(-1).state.engineGeneration;
+  assert.notEqual(generation, previousGeneration);
+  let before = panel.messages.length;
+  await panel.receive({type:"triggerEvent",name:"bang",values:[],engineGeneration:previousGeneration});
+  assert.equal(panel.messages.length, before);
+
+  panel.evaluate('runPanel.dispose();ensureRunPanel()');
+  const currentGeneration = publishEventSchema(panel);
+  before = panel.messages.length;
+  await panel.receive({type:"triggerEvent",name:"bang",values:[0.9],engineGeneration:currentGeneration});
+  assert.equal(panel.messages.length, before);
+});
 
 test("GPU state exposes MIDI selection and the configured theme", () => {
   for (const theme of ["light", "dark", "auto"]) {
