@@ -58,7 +58,7 @@ interface RunBufferPayload {
   channelsKind: "mono" | "static" | "dynamic";
   channelsStatic: number | null;
   loadedPath: string | null;
-  loadedFrames: number | null;
+  loadedSamples: number | null;
   loadedChannels: number | null;
   loadedSampleRate: number | null;
   waveform?: {
@@ -1204,7 +1204,7 @@ function mergeStoppedRunBuffers(
     return {
       ...buffer,
       loadedPath: binding,
-      loadedFrames: loaded?.loadedFrames ?? null,
+      loadedSamples: loaded?.loadedSamples ?? null,
       loadedChannels: loaded?.loadedChannels ?? null,
       loadedSampleRate: loaded?.loadedSampleRate ?? null,
       waveform: loaded?.waveform ?? null,

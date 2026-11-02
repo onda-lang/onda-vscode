@@ -372,7 +372,7 @@ for (const binding of [null, "/tmp/selected.wav"]) {
 
     // Replacing a previously loaded asset must also discard its waveform.
     panel.evaluate(`runPanelState.buffers = [{ name: "clip", loadedPath: "/tmp/default.wav",
-      loadedFrames: 100, loadedChannels: 2, loadedSampleRate: 48000,
+      loadedSamples: 100, loadedChannels: 2, loadedSampleRate: 48000,
       waveform: { minimums: [-1], maximums: [1] } }]`);
     const playbackLaunches = () => panel.launches.filter(({ args }) => args.includes("play")).length;
     await panel.receive(binding === null
@@ -382,7 +382,7 @@ for (const binding of [null, "/tmp/selected.wav"]) {
     assert.equal(panel.state().running, false);
     assert.equal(panel.state().error, null);
     assert.equal(panel.state().buffers[0].loadedPath, binding);
-    for (const field of ["loadedFrames", "loadedChannels", "loadedSampleRate", "waveform"]) {
+    for (const field of ["loadedSamples", "loadedChannels", "loadedSampleRate", "waveform"]) {
       assert.equal(panel.state().buffers[0][field], null);
     }
 
@@ -412,7 +412,7 @@ for (const binding of [null, "/tmp/selected.wav"]) {
     panel.reply(socket, socket.requests.at(-1), {});
     await Promise.resolve();
     const loaded = {
-      loadedPath: binding, loadedFrames: binding ? 1200 : null,
+      loadedPath: binding, loadedSamples: binding ? 1200 : null,
       loadedChannels: binding ? 2 : null, loadedSampleRate: binding ? 48000 : null,
       waveform: binding ? { minValue: -1, maxValue: 1, minimums: [-0.5], maximums: [0.5] } : null,
     };
@@ -424,8 +424,8 @@ for (const binding of [null, "/tmp/selected.wav"]) {
 
     panel.evaluate(`loadStoppedRunMetadata = async () => ({ buffers: [
       { name: "clip", index: 1, type: "f32", channelsKind: "dynamic", loadedPath: "/tmp/default.wav",
-        loadedFrames: 80, loadedChannels: 1, loadedSampleRate: 44100, waveform: { minimums: [-1] } },
-      { name: "new_clip", index: 0, loadedPath: "/tmp/new.wav", loadedFrames: 300 },
+        loadedSamples: 80, loadedChannels: 1, loadedSampleRate: 44100, waveform: { minimums: [-1] } },
+      { name: "new_clip", index: 0, loadedPath: "/tmp/new.wav", loadedSamples: 300 },
     ] })`);
     await panel.save();
     const [buffer, newBuffer] = panel.state().buffers;
@@ -436,7 +436,7 @@ for (const binding of [null, "/tmp/selected.wav"]) {
       assert.deepEqual(JSON.parse(JSON.stringify(buffer[key])), loaded[key]);
     }
     assert.equal(newBuffer.loadedPath, "/tmp/new.wav");
-    assert.equal(newBuffer.loadedFrames, 300);
+    assert.equal(newBuffer.loadedSamples, 300);
     assert.equal(panel.state().running, false);
     assert.equal(panel.state().error, null);
     assert.equal(panel.launches.length, 1);
