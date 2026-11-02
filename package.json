@@ -189,14 +189,15 @@
           "description": "Additional arguments passed to the selected Onda compiler before each built-in subcommand."
         },
         "onda.run.theme": {
-          "type": "string",
+          "type": ["string", "null"],
           "enum": [
-            "auto",
+            null,
             "dark",
             "light"
           ],
-          "default": "auto",
-          "description": "Theme used by the Onda run panel."
+          "enumItemLabels": ["Detect at startup", "Dark", "Light"],
+          "default": null,
+          "description": "Theme used by the Onda run panel. When unset, detect the VS Code appearance when the panel opens."
         },
         "onda.run.sampleRate": {
           "type": "integer",

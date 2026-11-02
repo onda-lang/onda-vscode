@@ -3,6 +3,27 @@ const test = require("node:test");
 const { createLifecyclePanel } = require("./helpers/runLifecycle");
 
 for (const paused of [false, true]) {
+  test(`Fast Math recompiles ${paused ? "paused" : "playing"} runs without changing transport intent`, async () => {
+    const panel = createLifecyclePanel();
+    await panel.start();
+    const socket = panel.connect();
+    if (paused) {
+      const stopping = panel.receive({ type: "stop" });
+      panel.reply(socket, socket.requests.at(-1), {});
+      await stopping;
+    }
+    await panel.receive({ type: "setFastMath", enabled: true });
+    assert.equal(panel.state().fastMath, true);
+    assert.equal(panel.state().processingRequested, !paused);
+    const plays = panel.launches.filter(({ args }) => args.includes("play"));
+    assert.equal(plays.length, paused ? 1 : 2);
+    if (paused) assert.equal(panel.daemonRequests.at(-2).fast_math, true);
+    else assert.equal(plays.at(-1).args.includes("--fast-math"), true);
+    const count = panel.launches.length;
+    for (const enabled of [true, "false", null]) await panel.receive({ type: "setFastMath", enabled });
+    assert.equal(panel.launches.length, count);
+  });
+
   test(`panel audio settings recompile ${paused ? "paused" : "playing"} runs without changing transport intent`, async () => {
     const panel = createLifecyclePanel();
     assert.equal(panel.state().supportsRunSettings, true);

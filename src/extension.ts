@@ -9,7 +9,12 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { initialRunParamValue, normalizeRunParams } from "./runMetadata";
+import {
+  initialRunParamValue,
+  NormalizedRunParamPayload,
+  normalizeRunParams,
+  sameEnumChoices,
+} from "./runMetadata";
 import {
   applyRunOutputNotification,
   clearRunLogState,
@@ -42,21 +47,7 @@ type RunEventValue =
   | RunEventValue[]
   | { [key: string]: RunEventValue };
 
-interface RunParamPayload {
-  index: number;
-  name: string;
-  type: string;
-  value: RunScalarValue;
-  default: number | null;
-  rangeMin: number | null;
-  rangeMax: number | null;
-  scale: string | null;
-  curve: number | null;
-  unit: string | null;
-  step: number | null;
-  stepCount: number | null;
-  scalar: boolean;
-}
+type RunParamPayload = NormalizedRunParamPayload;
 
 interface RunParamState extends RunParamPayload {}
 
@@ -1470,6 +1461,7 @@ function runParamsMatchForPreservation(
     next.unit === previous.unit &&
     next.step === previous.step &&
     next.stepCount === previous.stepCount &&
+    sameEnumChoices(next.enumeration, previous.enumeration) &&
     next.scalar === previous.scalar
   );
 }
@@ -2296,6 +2288,8 @@ function ensureRunPanel(preserveFocus = false): void {
       meter?: boolean;
       sampleRateHz?: number;
       blockSamples?: number;
+      enabled?: boolean;
+      mode?: "dark" | "light";
     };
     switch (payload.type) {
       case "scopeConfig":
@@ -2355,6 +2349,22 @@ function ensureRunPanel(preserveFocus = false): void {
         break;
       case "setRunSettings":
         await updateRunSettings(payload.sampleRateHz, payload.blockSamples);
+        break;
+      case "setFastMath":
+        if (typeof payload.enabled === "boolean" && payload.enabled !== runPanelState.fastMath) {
+          runPanelState = { ...runPanelState, fastMath: payload.enabled };
+          if (runPanelState.path) await restartRunForSourceChanges();
+          else postRunPanelState();
+        }
+        break;
+      case "setTheme":
+        if (payload.mode === "dark" || payload.mode === "light") {
+          const config = vscode.workspace.getConfiguration("onda");
+          const target = config.inspect("run.theme")?.workspaceValue === undefined
+            ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace;
+          await config.update("run.theme", payload.mode, target);
+          postRunPanelState();
+        }
         break;
       case "triggerEvent":
         if (typeof payload.name === "string" && runSchemaReady
@@ -2443,6 +2453,7 @@ function postRunPanelState(options: { resetEventArguments?: boolean } = {}): voi
     supportsDeviceSelection: true,
     supportsMidiInputSelection: true,
     supportsRunSettings: true,
+    supportsFastMath: true,
     canSetSampleRate: true,
     canSetBlockSize: true,
     supportsParamSmoothing: true,
@@ -2534,13 +2545,13 @@ function renderGpuRunHtml(webview: vscode.Webview): string {
     .replace("./host.js", hostUri.toString());
 }
 
-function ondaRunThemeSetting(): "auto" | "dark" | "light" {
+function ondaRunThemeSetting(): "dark" | "light" | null {
   const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("run.theme", "auto");
+  const value = config.get<string | null>("run.theme", null);
   if (value === "dark" || value === "light") {
     return value;
   }
-  return "auto";
+  return null;
 }
 
 function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number; args: string[] } {

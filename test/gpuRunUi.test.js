@@ -11,6 +11,57 @@ function publishEventSchema(panel) {
   return panel.messages.at(-1).state.engineGeneration;
 }
 
+test("enum labels reach the GPU panel and reloads preserve only the same choices", () => {
+  const panel = createRunPanel();
+  const enumeration = {
+    name: "Mode",
+    members: [{ name: "A", label: "First" }, { name: "B", label: "Second" }],
+  };
+  const metadata = {
+    name: "mode", type: "i32", defaultRepr: "0", rangeMinRepr: "0", rangeMaxRepr: "1",
+    stepRepr: "1", stepCount: 1, enumeration,
+  };
+  panel.context.metadata = metadata;
+  panel.evaluate(`runPanelState.params=mergeRunParams(require('./runMetadata').normalizeRunParams([metadata]), []);
+    runPanelState.params[0].value=1;postRunPanelState();`);
+  assert.deepEqual(panel.messages.at(-1).state.params[0].enumeration, enumeration);
+
+  metadata.enumeration.members[1].label = "Updated";
+  panel.evaluate(`runPanelState.params=mergeRunParams(require('./runMetadata').normalizeRunParams([metadata]), runPanelState.params);
+    postRunPanelState();`);
+  assert.equal(panel.messages.at(-1).state.params[0].value, 1);
+  assert.equal(panel.messages.at(-1).state.params[0].enumeration.members[1].label, "Updated");
+
+  metadata.enumeration.members.reverse();
+  panel.evaluate(`runPanelState.params=mergeRunParams(require('./runMetadata').normalizeRunParams([metadata]), runPanelState.params);
+    postRunPanelState();`);
+  assert.equal(panel.messages.at(-1).state.params[0].value, 0);
+});
+
+test("theme choices persist in VS Code configuration without launching audio", async () => {
+  const settings = {};
+  const panel = createRunPanel(undefined, { settings });
+  for (const mode of ["light", "dark"]) {
+    await panel.receive({ type: "setTheme", mode });
+    assert.equal(settings["run.theme"], mode);
+    assert.equal(panel.messages.at(-1).state.themeMode, mode);
+  }
+  for (const mode of ["auto", "invalid", null, true]) {
+    await panel.receive({ type: "setTheme", mode });
+    assert.equal(settings["run.theme"], "dark");
+  }
+});
+
+test("theme button updates an existing workspace override", async () => {
+  const settings = { "run.theme": null };
+  const workspaceSettings = { "run.theme": "light" };
+  const panel = createRunPanel(undefined, { settings, workspaceSettings });
+  await panel.receive({ type: "setTheme", mode: "dark" });
+  assert.equal(panel.messages.at(-1).state.themeMode, "dark");
+  assert.equal(workspaceSettings["run.theme"], "dark");
+  assert.equal(settings["run.theme"], null);
+});
+
 test("GPU events from a replaced engine cannot edit or trigger the current event", async () => {
   const panel = createLifecyclePanel();
   await panel.start();
@@ -77,7 +128,7 @@ test("recompiled stopped schemas and replaced panels reject their earlier event 
 });
 
 test("GPU state exposes MIDI selection and the configured theme", () => {
-  for (const theme of ["light", "dark", "auto"]) {
+  for (const theme of ["light", "dark", null]) {
     const panel = createRunPanel(undefined, { settings: { "run.theme": theme } });
     panel.evaluate("postRunPanelState()");
     const state = panel.messages.at(-1).state;

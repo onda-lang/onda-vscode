@@ -27,7 +27,7 @@ exports.run = async () => {
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
       } else if (request.action.startsWith('theme:')) {
         const theme = request.action.slice(6);
-        assert.ok(['light','dark','auto'].includes(theme));
+        assert.ok(['light','dark'].includes(theme));
         await vscode.workspace.getConfiguration('onda').update('run.theme', theme, vscode.ConfigurationTarget.Workspace);
       } else if (request.action === 'workbenchLight') {
         await vscode.workspace.getConfiguration('workbench').update('colorTheme', 'Default Light Modern', vscode.ConfigurationTarget.Workspace);

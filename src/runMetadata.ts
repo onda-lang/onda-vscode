@@ -1,5 +1,10 @@
 export type RunScalarValue = boolean | number | null;
 
+export interface RunEnumMetadata {
+  name: string;
+  members: { name: string; label: string }[];
+}
+
 export interface NormalizedRunParamPayload {
   index: number;
   name: string;
@@ -13,7 +18,18 @@ export interface NormalizedRunParamPayload {
   unit: string | null;
   step: number | null;
   stepCount: number | null;
+  enumeration: RunEnumMetadata | null;
   scalar: boolean;
+}
+
+export function sameEnumChoices(
+  left: RunEnumMetadata | null,
+  right: RunEnumMetadata | null,
+): boolean {
+  return left === right || !!left && !!right
+    && left.name === right.name
+    && left.members.length === right.members.length
+    && left.members.every((member, index) => member.name === right.members[index].name);
 }
 
 export function normalizeRunParams(raw: unknown): NormalizedRunParamPayload[] | undefined {
@@ -70,8 +86,27 @@ function normalizeRunParam(raw: unknown): NormalizedRunParamPayload {
     unit: stringField(source, ["unit"]),
     step: numberField(source, ["step"], ["stepRepr", "step_repr"]),
     stepCount: numberField(source, ["stepCount", "step_count"]),
+    enumeration: enumMetadata(source.enumeration),
     scalar: source.scalar !== false,
   };
+}
+
+function enumMetadata(raw: unknown): RunEnumMetadata | null {
+  if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name
+    || !Array.isArray(raw.members) || raw.members.length === 0) {
+    return null;
+  }
+  const members: RunEnumMetadata["members"] = [];
+  const names = new Set<string>();
+  for (const member of raw.members) {
+    if (!isRecord(member) || typeof member.name !== "string" || !member.name
+      || typeof member.label !== "string" || names.has(member.name)) {
+      return null;
+    }
+    names.add(member.name);
+    members.push({ name: member.name, label: member.label });
+  }
+  return { name: raw.name, members };
 }
 
 function defaultField(

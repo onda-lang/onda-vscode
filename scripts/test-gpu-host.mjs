@@ -33,7 +33,7 @@ await writeFile(join(root, 'workspace', '.vscode', 'settings.json'), JSON.string
   'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
   'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',
 }));
-const fixture = frequency => `params:\n  freq = ${frequency}.0 {20.0, 20000.0}\ninit:\n  phase = 0.0\n  previous = -1.0\nblock:\n  if freq != previous:\n    print(freq)\n    previous = freq\nsample:\n  out1 = sin(phase) * 0.00001\n  out2 = sin(phase) * 0.00001\n  phase = (phase + freq * TWO_PI / SR) % TWO_PI\n`;
+const fixture = (frequency, label = 'High-pass') => `enum Mode:\n  LowPass\n  HighPass {label = "${label}"}\nenum One:\n  Only\nparams:\n  freq = ${frequency}.0 {20.0, 20000.0}\n  mode = Mode::HighPass\n  fixed = One::Only\ninit:\n  phase = 0.0\n  previous = -1.0\nblock:\n  if freq != previous:\n    print(freq)\n    previous = freq\nsample:\n  out1 = sin(phase) * 0.00001\n  out2 = sin(phase) * 0.00001\n  phase = (phase + freq * TWO_PI / SR) % TWO_PI\n`;
 const source = join(root, 'workspace', 'host.onda');
 await writeFile(source, fixture(440));
 const listener = createServer();
@@ -157,6 +157,10 @@ try {
   // handshake for a fresh snapshot before asserting advertised capabilities.
   await page.canvas(`window.dispatchEvent(new MessageEvent('message', {data:{type:'requestRunViewReady'}}))`);
   await until(() => page.canvas('probe.messages.some(m => m.state?.supportsMidiInputSelection === true)'), 'initial capabilities');
+  await until(() => page.canvas(`probe.messages.some(m => m.state?.params?.some(p =>
+    p.name === 'mode' && p.enumeration?.members[1].label === 'High-pass'))`), 'enum choices reaching the canvas');
+  assert.ok(await page.canvas(`probe.messages.some(m => m.state?.params?.some(p =>
+    p.name === 'fixed' && p.stepCount === 0 && p.enumeration?.members.length === 1))`), 'Singleton enums must remain published');
   await until(() => page.canvas('probe.packets >= 3'), 'scope pinned by default');
   const clickScopeHeader = async () => {
     const point = await page.evaluate(`(() => {
@@ -180,9 +184,11 @@ try {
   assert.equal(await page.canvas('document.documentElement.dataset.theme'), 'light', 'Explicit light theme must reach the canvas');
   await host('theme:dark');
   await until(() => page.canvas('document.documentElement.dataset.theme === "dark"'), 'live theme preference');
-  await host('theme:auto');
   await host('workbenchLight');
-  await until(() => page.canvas('document.documentElement.dataset.theme === "light"'), 'automatic VS Code theme tracking');
+  await until(() => page.canvas('document.body.classList.contains("vscode-light")'), 'light VS Code workbench');
+  assert.equal(await page.canvas('document.documentElement.dataset.theme'), 'dark', 'Chosen theme must survive workbench appearance changes');
+  await host('theme:light');
+  await until(() => page.canvas('document.documentElement.dataset.theme === "light"'), 'restored light choice');
   const scope = await page.canvas('({channels:probe.channels,columns:probe.columns})');
   assert.equal(scope.channels, 2);
   assert.ok(scope.columns > 0 && scope.columns <= 512);
@@ -203,6 +209,9 @@ try {
   await writeFile(join(root, 'vscode.png'), Buffer.from(screenshot.data, 'base64'));
   workbenchSocket.close();
   await page.canvas('document.querySelector("canvas").focus()');
+  // Begin keyboard navigation outside any popup left open during inspection.
+  for (let step = 0; step < 2; step++)
+    await page.call('Input.dispatchKeyEvent', {type:'keyDown',key:'Escape',windowsVirtualKeyCode:27});
   for (let step = 0; step < 40; step++) {
     await page.call('Input.dispatchKeyEvent', {type:'keyDown',key:'Tab',windowsVirtualKeyCode:9});
     if (await page.canvas('document.activeElement.tagName === "TEXTAREA" && document.activeElement.value === "440"')) break;
@@ -228,11 +237,13 @@ try {
   assert.equal(await page.canvas('probe.packets'), hidden, 'Hidden panel must stop scope work');
   await host('show');
   await until(() => page.canvas(`probe.packets > ${hidden + 2}`), 'scope after showing the panel');
-  await writeFile(source, fixture(220));
+  await writeFile(source, fixture(220, 'Bright'));
   await until(() => page.canvas(`probe.messages.some(m => m.type==='state' && m.state?.params?.some(p=>p.name==='freq' && p.value===220))`), 'source reload');
+  await until(() => page.canvas(`probe.messages.some(m => m.state?.params?.some(p =>
+    p.name === 'mode' && p.enumeration?.members[1].label === 'Bright'))`), 'reloaded enum labels');
   assert.equal(await page.canvas('document.querySelector("#status").hidden'), true, 'Renderer must remain healthy');
   await writeFile(join(root, 'result.json'), JSON.stringify({ passed: true, scope, extension: developmentPath, vsix: vsix ? resolve(vsix) : null,
-    checks: ['real extension host', 'real playback', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'explicit and automatic theme changes', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
+    checks: ['real extension host', 'real playback', 'enum choices and singleton metadata', 'enum label reload', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'binary theme choices independent of workbench appearance', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
   await host('done');
   page.socket.close();
   const [code] = await ended;

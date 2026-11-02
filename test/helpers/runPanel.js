@@ -10,7 +10,7 @@ afterEach(() => {
   panels.clear();
 });
 
-function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}) {
+function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings = {}, modules = {} } = {}) {
   const extensionPath = path.join(__dirname, "..", "..", "out", "extension.js");
   const extensionRequire = createRequire(extensionPath);
   const messages = [];
@@ -35,16 +35,19 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
     require(name) {
       if (name in modules) return modules[name];
       if (name === "vscode") return {
+        ConfigurationTarget: { Global: 1, Workspace: 2 },
         ViewColumn: { Beside: 2 },
         Uri: { file: (file) => ({ scheme: "file", fsPath: file, toString: () => file }) },
         workspace: { textDocuments: [], getWorkspaceFolder: () => undefined, createFileSystemWatcher: () => ({}), getConfiguration: () => ({
-          inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key] }),
+          inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key], workspaceValue: workspaceSettings[key] }),
           get: (key, fallback) => ({
             "compiler.source": "external",
             "server.path": "/custom/onda",
             "server.args": ["--custom-option"],
             ...settings,
+            ...workspaceSettings,
           })[key] ?? fallback,
+          update: async (key, value, target) => { (target === 2 ? workspaceSettings : settings)[key] = value; },
         }) },
         window: { setStatusBarMessage(text, timeout) {
           const message = { text, timeout, disposed: false };

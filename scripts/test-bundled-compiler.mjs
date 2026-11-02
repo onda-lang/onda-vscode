@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { compilerTargets, extensionRoot, verifyCompilerBundle } from "./compiler-bundle.mjs";
 
 const root = resolve(process.argv[2] || extensionRoot);
@@ -12,6 +13,19 @@ const command = join(root, "compiler", target, "bin", compilerTargets[target].ex
 const workspace = realpathSync(mkdtempSync(join(tmpdir(), "onda-bundled-smoke-")));
 // An absolute bundled executable must work without any Onda installation on PATH.
 const env = { ...process.env, PATH: "", Path: "" };
+const enumSource = join(workspace, "enums.onda");
+const enumText = `enum Mode:
+  LowPass
+  HighPass {label = "High-pass"}
+enum One:
+  Only
+params:
+  mode = Mode::HighPass
+  fixed = One::Only
+  modes: Mode[2] = [Mode::LowPass, Mode::HighPass]
+sample:
+  out1 = i32(mode)
+`;
 
 function run(args) {
   const result = spawnSync(command, args, { cwd: workspace, env, encoding: "utf8", timeout: 30000 });
@@ -25,6 +39,7 @@ async function testLanguageServer() {
   let buffer = Buffer.alloc(0);
   let stderr = "";
   let initialized = false;
+  let completed = false;
   let shutdown = false;
   const send = message => {
     const body = JSON.stringify({ jsonrpc: "2.0", ...message });
@@ -36,7 +51,7 @@ async function testLanguageServer() {
       child.once("error", reject);
       child.once("close", code => {
         clearTimeout(timeout);
-        if (code === 0 && initialized && shutdown) resolve();
+        if (code === 0 && initialized && completed && shutdown) resolve();
         else reject(new Error(`Bundled LSP exited ${code}: ${stderr}`));
       });
       child.stderr.on("data", chunk => { stderr += chunk.toString(); });
@@ -58,8 +73,21 @@ async function testLanguageServer() {
               assert.equal(message.result.serverInfo.version, manifest.version);
               initialized = true;
               send({ method: "initialized", params: {} });
-              send({ id: 2, method: "shutdown", params: null });
+              const uri = pathToFileURL(enumSource).href;
+              send({ method: "textDocument/didOpen", params: {
+                textDocument: { uri, languageId: "onda", version: 1, text: enumText },
+              } });
+              const prefix = enumText.slice(0, enumText.indexOf("Mode::HighPass") + "Mode::".length).split("\n");
+              send({ id: 2, method: "textDocument/completion", params: {
+                textDocument: { uri }, position: { line: prefix.length - 1, character: prefix.at(-1).length },
+              } });
             } else if (message.id === 2) {
+              const items = Array.isArray(message.result) ? message.result : message.result?.items;
+              for (const label of ["LowPass", "HighPass"])
+                assert.ok(items?.some(item => item.label === label && item.kind === 20), JSON.stringify(message));
+              completed = true;
+              send({ id: 3, method: "shutdown", params: null });
+            } else if (message.id === 3) {
               assert.ok(!message.error, JSON.stringify(message));
               shutdown = true;
               send({ method: "exit", params: null });
@@ -81,13 +109,20 @@ try {
   writeFileSync(source, "import std/osc\ninit:\n  osc = std::osc::Sine()\nsample:\n  out1 = osc(freq = 440.0)\n");
   run(["compile", source, "--emit", "obj", "--output", join(workspace, "sine.o")]);
   assert.ok(statSync(join(workspace, "sine.o")).size > 0);
+  writeFileSync(enumSource, enumText);
+  const enumMir = join(workspace, "enums.json");
+  run(["compile", enumSource, "--emit", "mir-json", "--output", enumMir]);
+  const params = JSON.parse(readFileSync(enumMir, "utf8")).interface.params;
+  assert.equal(params[0].enumeration.members[1].label, "High-pass");
+  assert.equal(params[1].enumeration.members.length, 1);
+  assert.equal(params[2].enumeration.name, "Mode");
   run(["run", "render", source, "--dur", "0.01", "--output", join(workspace, "sine.wav")]);
   assert.equal(readFileSync(join(workspace, "sine.wav")).toString("ascii", 0, 4), "RIFF");
   const project = join(workspace, "project");
   run(["project", project, "--from", source]);
   assert.ok(readdirSync(project).some(name => name.endsWith(".ondaproject")));
   await testLanguageServer();
-  console.log(`Bundled Onda ${manifest.version} (${target}): version, stdlib/object compilation, audio render, project export, and LSP passed with PATH empty.`);
+  console.log(`Bundled Onda ${manifest.version} (${target}): version, stdlib/object compilation, enum metadata, audio render, project export, and LSP enum completion passed with PATH empty.`);
 } finally {
   rmSync(workspace, { recursive: true, force: true });
 }

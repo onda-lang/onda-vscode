@@ -35,9 +35,13 @@ Onda installation is not required.
 | `onda.compiler.source` | `bundled`; choose `external` to use a custom compiler. |
 | `onda.server.path` | Used with `external`; unset finds `onda` on `PATH`. |
 | `onda.server.args` | Empty; arguments before each compiler subcommand. |
-| `onda.run.theme` | `auto`; also accepts `dark` or `light`. |
+| `onda.run.theme` | Unset (`null`) detects VS Code's appearance when the panel opens; accepts `dark` or `light`. |
 | `onda.run.sampleRate` | 48,000 Hz for the next run. |
 | `onda.run.blockSize` | 512 frames for the next run. |
+
+The run panel's Settings changes sample rate, block size, and Fast Math immediately by
+recompiling, preserving whether playback was running or stopped. Its ◐ button cycles
+Dark / Light and saves the theme in VS Code settings. The button also appears in the unloaded view.
 
 To use a custom compiler:
 
@@ -52,6 +56,10 @@ Use an Onda build matching [onda-version](onda-version) so the compiler, control
 protocol, and UI agree. Changing compiler source/path/arguments stops playback
 and restarts the language server. The run panel's smoothing setting applies live
 and survives source reloads.
+
+Enum parameters use labelled dropdowns in the run panel. Reloading display labels
+preserves the selected member; changing the enum type or member order resets the
+selection to the new default.
 
 ## Development
 
