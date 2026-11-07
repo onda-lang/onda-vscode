@@ -132,3 +132,45 @@ test("malformed enum metadata cannot reach the run UI", () => {
     assert.equal(param.enumeration, null);
   }
 });
+
+test("i64 values and defaults retain every bit through metadata and initialization", () => {
+  for (const value of ["-9223372036854775808", "-9007199254740993", "9007199254740993", "9223372036854775807"]) {
+    const [param] = normalizeRunParams([{
+      name: "wide", type: "i64", valueRepr: value, defaultRepr: value,
+    }]);
+    assert.equal(param.value, value);
+    assert.equal(param.default, value);
+    assert.equal(initialRunParamValue(param), value);
+  }
+  const [ranged] = normalizeRunParams([{
+    name: "count", type: "i64", defaultRepr: "2",
+    rangeMinRepr: "-10", rangeMaxRepr: "10", stepRepr: "2", stepCount: 10,
+  }]);
+  assert.equal(initialRunParamValue(ranged), "2");
+  assert.equal(ranged.rangeMin, -10);
+  assert.equal(ranged.rangeMax, 10);
+  assert.equal(ranged.step, 2);
+  assert.equal(initialRunParamValue({ type: "i64", value: null, default: null, rangeMin: null }), "0");
+});
+
+test("flattened parameter arrays retain their logical grouping", () => {
+  const array = { name: "modes", length: 2, index: 1 };
+  const [param] = normalizeRunParams([{ name: "modes[1]", type: "i32", valueRepr: "1", array }]);
+  assert.deepEqual(param.array, array);
+});
+
+test("floating parameter metadata keeps special values safe for JSON replay", () => {
+  for (const type of ["f32", "f64"]) {
+    for (const [repr, expected] of [["inf", "Infinity"], ["-inf", "-Infinity"], ["NaN", "NaN"], ["-0", "-0"], ["0", 0]]) {
+      const [param] = normalizeRunParams([{ name: "gain", type, valueRepr: repr, defaultRepr: repr }]);
+      assert.equal(initialRunParamValue(param), expected);
+      assert.equal(param.default, expected);
+      assert.equal(JSON.parse(JSON.stringify(param)).value, expected);
+    }
+    for (const [value, expected] of [[Infinity, "Infinity"], [-Infinity, "-Infinity"], [NaN, "NaN"], [-0, "-0"]]) {
+      const [param] = normalizeRunParams([{ name: "gain", type, value, default: value }]);
+      assert.equal(param.value, expected);
+      assert.equal(param.default, expected);
+    }
+  }
+});

@@ -12,8 +12,10 @@ Requires VS Code 1.90 or newer. Install from the
 or [Open VSX](https://open-vsx.org/extension/onda-lang/onda-vscode), or use
 **Extensions: Install from VSIX…** for a packaged build.
 
-The compiler is included for Linux x64, Windows x64, and macOS arm64; a separate
-Onda installation is not required.
+The compiler is included for Linux x64 and arm64, Windows x64, and macOS arm64;
+a separate Onda installation is not required. Linux packages use the Debian 12
+baseline (glibc 2.36 and PipeWire 0.3.65). The bundled macOS compiler declares
+macOS 11.0 as its minimum; the installed VS Code version may require a newer OS.
 
 ## Commands
 
@@ -57,6 +59,15 @@ protocol, and UI agree. Changing compiler source/path/arguments stops playback
 and restarts the language server. The run panel's smoothing setting applies live
 and survives source reloads.
 
+One compiler serves the whole VS Code window. Set compiler source, path, and
+arguments in **User** or **Workspace** settings. In a multi-root workspace, put
+these settings in the `.code-workspace` file; individual folders cannot override
+them. The compiler source and executable path are excluded from Settings Sync.
+
+Language services watch saved source dependencies, including files outside the
+workspace, and refresh diagnostics when dependencies change or missing files appear.
+Parameter Reset restores defaults immediately, independently of smoothing.
+
 Enum parameters use labelled dropdowns in the run panel. Reloading display labels
 preserves the selected member; changing the enum type or member order resets the
 selection to the new default.
@@ -74,9 +85,10 @@ npm test
 npm run package:embedded -- /path/to/extracted-onda-release linux-x64 onda.vsix
 ```
 
-Use `win32-x64` or `darwin-arm64` on those hosts; staging executes the compiler to
-verify its version and requires a matching host architecture. Both staged bundles
-must match `onda-version`. Extension builds copy the generated UI into `out/gpu`.
+Use `linux-arm64`, `win32-x64`, or `darwin-arm64` on those hosts; staging executes
+the compiler to verify its version and requires a matching host architecture.
+Both staged bundles must match `onda-version`. Extension builds copy the generated
+UI into `out/gpu`.
 
 For a real extension-host/playback check, with VS Code available as `code` or
 selected by `VSCODE_BIN`:
@@ -89,3 +101,16 @@ Pass a VSIX path as the second argument to test its installed contents. The test
 uses a temporary profile and checks playback, parameter edits, panel visibility,
 and source reload. `npm run test:compiler` separately checks the bundled CLI/LSP
 without relying on an Onda installation on `PATH`.
+
+`npm run test:integration` exercises the extension with real LSP, daemon, and playback
+processes, including dependency recovery, exact integer controls, event payloads,
+pending buffer edits across reloads, cancellation, and subprocess cleanup.
+It uses the staged compiler by default and requires an
+audio output device. Select a local compiler with
+`npm run test:integration -- /path/to/onda`. To check packaged extension code and
+its bundled compiler, run
+`node scripts/test-run-integration.mjs bundled /path/to/extracted-vsix/extension`.
+
+For development builds sharing a version number, restage the compiler after
+rebuilding Onda. The compiler smoke test prints its executable checksum and checks
+the current language features; matching version text alone does not identify a build.

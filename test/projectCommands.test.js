@@ -34,6 +34,29 @@ function createProjectPanel() {
   return { ...panel, launches };
 }
 
+test("project names fit the generated manifest's UTF-8 filename limit", () => {
+  const panel = createRunPanel();
+  panel.context.Buffer = Buffer;
+  for (const name of [
+    "a".repeat(243),
+    "é".repeat(121) + "a",
+    "e\u0301".repeat(121) + "a",
+    "a".repeat(243) + ".ondaproject",
+    "a".repeat(243) + ".ONDAPROJECT",
+  ]) {
+    panel.context.projectName = name;
+    assert.equal(panel.evaluate("validateProjectName(projectName)"), undefined, name);
+  }
+  for (const name of [
+    "a".repeat(244),
+    "é".repeat(122),
+    "a".repeat(244) + ".ondaproject",
+  ]) {
+    panel.context.projectName = name;
+    assert.match(panel.evaluate("validateProjectName(projectName)"), /including \.ondaproject.*255/, name);
+  }
+});
+
 for (const command of ["createProject()", "saveAsProject(source)"]) {
   for (const state of ["clean", "closed", "dirty", "save failure"]) {
     test(`${command} handles a ${state} source`, async () => {

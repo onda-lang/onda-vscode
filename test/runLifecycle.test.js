@@ -2,6 +2,132 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createLifecyclePanel } = require("./helpers/runLifecycle");
 
+for (const action of ["stopFile({silent:true})", "runPanel.dispose()", "runFile('/tmp/new.onda')", "deactivate()", "refreshStoppedRunMetadata('/tmp/new.onda')"]) {
+  test(`obsolete metadata compilation is terminated by ${action}`, async () => {
+    const panel = createLifecyclePanel();
+    panel.holdMetadata();
+    const refreshing = panel.evaluate("refreshStoppedRunMetadata('/tmp/lifecycle.onda')");
+    await new Promise(resolve => setImmediate(resolve));
+    const child = panel.launches[0].child;
+    panel.evaluate("client=undefined");
+    const invalidating = panel.evaluate(action);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(child.killed, true);
+    // Simulate an already buffered late reply from the terminated compiler.
+    panel.releaseMetadata();
+    await Promise.all([refreshing, invalidating]);
+  });
+}
+
+test("playback source paths survive a UTF-8 character split across pipe chunks", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const bytes = Buffer.from(JSON.stringify({event:"sources",files:["/tmp/café.onda"],complete:true}) + "\n");
+  const split = bytes.indexOf(Buffer.from("é")) + 1;
+  const stdout = panel.launches.at(-1).child.stdout;
+  stdout.emit("data", bytes.subarray(0, split));
+  stdout.emit("data", bytes.subarray(split));
+  assert.equal(panel.evaluate("runSourceFiles.has('/tmp/café.onda')"), true);
+});
+
+for (const cancelled of [true, false]) test(`an older buffer reply cannot replace a newer clear (cancelled: ${cancelled})`, async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate("refreshRunBuffers=async()=>{};runPanelState.buffers=[{name:'clip',loadedPath:null}]");
+  const binding = panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/slow.wav" });
+  const bindRequest = socket.requests.at(-1);
+  const clearing = panel.receive({ type: "clearBuffer", name: "clip" });
+  const clearRequest = socket.requests.at(-1);
+  panel.reply(socket, clearRequest, {});
+  await clearing;
+  socket.emit("data", JSON.stringify({ id: bindRequest.id, ok: true, cancelled }) + "\n");
+  await binding;
+  assert.equal(panel.evaluate("preservedRunBufferBindings.get('clip')"), null);
+  panel.evaluate("reapplyCachedRunBuffers()");
+  assert.equal(socket.requests.at(-1).command, "clearBuffer");
+  panel.reply(socket, socket.requests.at(-1), {});
+});
+
+test("a canceled buffer load is neither cached nor reported as a failure", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  const binding = panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/canceled.wav" });
+  const request = socket.requests.at(-1);
+  socket.emit("data", JSON.stringify({ id: request.id, ok: true, cancelled: true }) + "\n");
+  await binding;
+  assert.equal(panel.evaluate("preservedRunBufferBindings.has('clip')"), false);
+  assert.equal(panel.evaluate("runPanelState.error"), undefined);
+});
+
+for (const filePath of ["/tmp/selected.wav", null]) {
+  test(`replacing playback preserves a pending buffer edit: ${filePath}`, async t => {
+    const panel = createLifecyclePanel();
+    t.after(() => panel.evaluate("stopFile({silent:true})"));
+    await panel.start();
+    panel.connect();
+    panel.evaluate(`runPanelState.buffers=[{name:'clip'}];
+      preservedRunBufferBindings.set('clip','/tmp/previous.wav');`);
+    const superseded = filePath === null
+      ? panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/older.wav" })
+      : Promise.resolve();
+    const editing = panel.receive(filePath === null
+      ? { type: "clearBuffer", name: "clip" }
+      : { type: "bindBufferFile", name: "clip", filePath });
+    await panel.evaluate('runFile("/tmp/lifecycle.onda",{restart:true})');
+    await Promise.all([editing, superseded]);
+    assert.equal(panel.evaluate("preservedRunBufferBindings.get('clip')"), filePath);
+    const socket = panel.connect();
+    panel.evaluate("refreshRunBuffers=async()=>{};runPanelState.buffers=[{name:'clip'}]");
+    const restoring = panel.evaluate("reapplyCachedRunBuffers()");
+    const request = socket.requests.at(-1);
+    assert.equal(request.command, filePath === null ? "clearBuffer" : "bindBufferWav");
+    if (filePath !== null) assert.equal(request.path, filePath);
+    panel.reply(socket, request, {});
+    await restoring;
+  });
+}
+
+test("a source switch does not inherit pending buffer edits", async t => {
+  const panel = createLifecyclePanel();
+  t.after(() => panel.evaluate("stopFile({silent:true})"));
+  await panel.start();
+  panel.connect();
+  const editing = panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/old.wav" });
+  await panel.evaluate('runFile("/tmp/new.onda")');
+  await editing;
+  assert.equal(panel.evaluate("preservedRunBufferBindings.size"), 0);
+});
+
+test("a completed clear is not replaced by an older buffer load interrupted by reload", async t => {
+  const panel = createLifecyclePanel();
+  t.after(() => panel.evaluate("stopFile({silent:true})"));
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate("refreshRunBuffers=async()=>{}");
+  const binding = panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/older.wav" });
+  const clearing = panel.receive({ type: "clearBuffer", name: "clip" });
+  panel.reply(socket, socket.requests.at(-1), {});
+  await clearing;
+  await panel.evaluate('runFile("/tmp/lifecycle.onda",{restart:true})');
+  await binding;
+  assert.equal(panel.evaluate("preservedRunBufferBindings.get('clip')"), null);
+});
+
+test("a failed buffer replacement retains the previous confirmed binding", async t => {
+  const panel = createLifecyclePanel();
+  t.after(() => panel.evaluate("stopFile({silent:true})"));
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate("vscode.window.showErrorMessage=()=>{};preservedRunBufferBindings.set('clip','/tmp/previous.wav')");
+  const editing = panel.receive({ type: "bindBufferFile", name: "clip", filePath: "/tmp/missing.wav" });
+  panel.reply(socket, socket.requests.at(-1), {}, "File not found");
+  await editing;
+  await panel.evaluate('runFile("/tmp/lifecycle.onda",{restart:true})');
+  assert.equal(panel.evaluate("preservedRunBufferBindings.get('clip')"), "/tmp/previous.wav");
+});
+
 for (const paused of [false, true]) {
   test(`Fast Math recompiles ${paused ? "paused" : "playing"} runs without changing transport intent`, async () => {
     const panel = createLifecyclePanel();
@@ -477,6 +603,63 @@ test("parameter edits survive identical declarations but changed defaults reset 
   assert.equal(unchanged[0].value, 0.8);
   const updated = panel.evaluate('mergeRunParams(normalizeRunParams([{ name: "gain", type: "f32", default: 0.25 }]), edited)');
   assert.equal(updated[0].value, 0.25);
+});
+
+test("a changed floating default's zero sign resets the cached parameter", () => {
+  const panel = createLifecyclePanel();
+  const merged = panel.evaluate(`
+    const normalizeRunParams = require('./runMetadata').normalizeRunParams;
+    const before = normalizeRunParams([{name:'gain', type:'f64', defaultRepr:'0'}]);
+    const after = normalizeRunParams([{name:'gain', type:'f64', defaultRepr:'-0'}]);
+    mergeRunParams(after, [{...before[0], value:0.5}])
+  `);
+  assert.equal(merged[0].value, "-0");
+});
+
+test("Reset uses the acknowledged native reset instead of smoothed parameter writes", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate(`runPanelState.params = require('./runMetadata').normalizeRunParams([{name:'gain',type:'f64',value:1,defaultRepr:'-0'}])`);
+  const resetting = panel.receive({type:"resetParams"});
+  const request = socket.requests.at(-1);
+  assert.equal(request.command, "resetParams");
+  assert.equal(typeof request.id, "number");
+  panel.reply(socket, request, {});
+  await resetting;
+  assert.equal(panel.evaluate("runPanelState.params[0].value"), "-0");
+  assert.equal(socket.requests.some(request => request.command === "setParam"), false);
+});
+
+for (const newerEdit of [false, true]) test(`a rejected Reset preserves the accepted value (newer edit: ${newerEdit})`, async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate(`runPanelState.params = require('./runMetadata').normalizeRunParams([{name:'gain',type:'f64',value:1,default:0}])`);
+  const resetting = panel.receive({type:"resetParams"});
+  const request = socket.requests.at(-1);
+  if (newerEdit) await panel.receive({type:"setParam", name:"gain", value:0.5});
+  panel.reply(socket, request, undefined, "Reset failed");
+  await resetting;
+  assert.equal(panel.evaluate("runPanelState.params[0].value"), newerEdit ? 0.5 : 1);
+  assert.equal(panel.evaluate("runPanelState.error"), "Reset failed");
+});
+
+test("an obsolete Reset failure cannot replace a newer Reset", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  panel.evaluate(`runPanelState.params = require('./runMetadata').normalizeRunParams([{name:'gain',type:'f64',value:1,default:0}])`);
+  const first = panel.receive({type:"resetParams"});
+  const firstRequest = socket.requests.at(-1);
+  const second = panel.receive({type:"resetParams"});
+  const secondRequest = socket.requests.at(-1);
+  panel.reply(socket, firstRequest, undefined, "Obsolete failure");
+  await first;
+  panel.reply(socket, secondRequest, {});
+  await second;
+  assert.equal(panel.evaluate("runPanelState.error"), undefined);
+  assert.equal(panel.evaluate("runPanelState.params[0].value"), 0);
 });
 
 for (const [change, expected] of [

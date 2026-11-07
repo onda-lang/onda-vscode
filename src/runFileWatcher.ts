@@ -98,7 +98,7 @@ export class RunFileWatcher {
   private validationRetryTimer: NodeJS.Timeout | undefined;
 
   constructor(
-    private readonly onChange: () => void,
+    private readonly onChange: (files: string[]) => void,
     private readonly shouldDefer = () => false,
     private readonly onValidationError: (file: string, error: unknown) => void = () => {},
   ) {}
@@ -314,8 +314,9 @@ export class RunFileWatcher {
         this.schedule();
         return;
       }
+      const files = [...this.pending];
       this.pending.clear();
-      this.onChange();
+      this.onChange(files);
     }, 100);
     this.timer.unref();
   }

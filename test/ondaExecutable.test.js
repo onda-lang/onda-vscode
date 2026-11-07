@@ -50,10 +50,10 @@ for (const source of [undefined, "bundled", "external"]) {
           launches.push({ command, args });
           const stream = () => Object.assign(new EventEmitter(), { setEncoding() {} });
           const child = Object.assign(new EventEmitter(), { stdout: stream(), stderr: stream(), kill() {} });
-          child.stdin = { end() {}, write(line) {
+          child.stdin = Object.assign(new EventEmitter(), { end() {}, write(line) {
             const { id } = JSON.parse(line);
             queueMicrotask(() => child.stdout.emit("data", JSON.stringify({ id, ok: true, result: {} }) + "\n"));
-          } };
+          } });
           queueMicrotask(() => child.emit("close", 0));
           return child;
         } },
@@ -160,7 +160,7 @@ for (const duringStart of [false, true]) {
   });
 }
 
-test("restarting the compiler reuses the extension's language file watchers", async () => {
+test("restarting the compiler cancels dependency discovery and replaces its watcher", async () => {
   const panel = createRunPanel(undefined, {
     modules: { "vscode-languageclient/node": {
       TransportKind: { stdio: 0 },
@@ -176,10 +176,19 @@ test("restarting the compiler reuses the extension's language file watchers", as
     vscode.commands = { registerCommand: () => ({}) };
   `);
   await panel.evaluate("activate({ subscriptions: [], extensionPath: extensionRoot })");
-  assert.equal(panel.evaluate("watchersCreated"), 2);
+  panel.evaluate(`
+    const previousDependencies = languageDependencies;
+    withOndaDaemon = (_file, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('canceled')), {once:true});
+    });
+    const discovering = languageDependencies.open('/tmp/language-restart.onda');
+  `);
+  await new Promise(resolve => setImmediate(resolve));
   await panel.evaluate("restartClient()");
+  await panel.evaluate("discovering");
+  assert.equal(panel.evaluate("languageDependencies !== previousDependencies"), true);
   await panel.evaluate("restartClient()");
-  assert.equal(panel.evaluate("watchersCreated"), 2);
+  assert.equal(panel.evaluate("watchersCreated"), 0);
   await panel.evaluate("deactivate()");
 });
 

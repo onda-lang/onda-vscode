@@ -11,6 +11,36 @@ function publishEventSchema(panel) {
   return panel.messages.at(-1).state.engineGeneration;
 }
 
+test("event defaults and resets preserve scalar special float encodings", async () => {
+  const panel = createLifecyclePanel();
+  await panel.start();
+  const socket = panel.connect();
+  panel.context.defaults = ["NaN", "Infinity", "-Infinity", -0];
+  panel.evaluate(`runSchemaReady=true;
+    runPanelState.events=mergeRunEvents(defaults.map((value,index)=>({name:'event'+index,args:[{
+      name:'value',type:'f64',shape:{kind:'scalar',encoding:'f64'},default:value
+    }]})),[]);postRunPanelState()`);
+  const expected = ["NaN", "Infinity", "-Infinity", "-0"];
+  assert.deepEqual(Array.from(panel.messages.at(-1).state.events, event => event.args[0].value), expected);
+  for (let index = 0; index < expected.length; index++) {
+    const generation = panel.evaluate("String(runEngineGeneration)");
+    const triggering = panel.receive({type:"triggerEvent",name:`event${index}`,values:[],engineGeneration:generation});
+    const request = socket.requests.at(-1);
+    assert.deepEqual(request.values, [expected[index]]);
+    panel.reply(socket, request, {});
+    await triggering;
+  }
+  panel.evaluate("runPanelState.events.forEach(event=>event.args[0].value=42)");
+  await panel.receive({type:"resetEventArguments"});
+  assert.deepEqual(Array.from(panel.messages.at(-1).state.events, event => event.args[0].value), expected);
+
+  panel.evaluate(`runPanelState.events=mergeRunEvents([{name:'nested',args:[{
+    name:'patch',type:'Patch',default:{values:[-0,'Infinity'],id:'9007199254740993'}
+  }]}],[]);postRunPanelState()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(panel.messages.at(-1).state.events[0].args[0].value)),
+    {values:['-0','Infinity'],id:'9007199254740993'});
+});
+
 test("enum labels reach the GPU panel and reloads preserve only the same choices", () => {
   const panel = createRunPanel();
   const enumeration = {

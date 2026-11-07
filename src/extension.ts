@@ -2,6 +2,7 @@
 import * as fs from "fs";
 import * as net from "net";
 import * as path from "path";
+import { StringDecoder } from "string_decoder";
 import * as vscode from "vscode";
 import {
   LanguageClient,
@@ -10,10 +11,13 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 import {
+  defaultRunParamValue,
   initialRunParamValue,
   NormalizedRunParamPayload,
   normalizeRunParams,
   sameEnumChoices,
+  RunScalarValue,
+  wireRunFloat,
 } from "./runMetadata";
 import {
   applyRunOutputNotification,
@@ -30,6 +34,7 @@ import { describeOndaExecutableError } from "./executableError";
 import { OndaCompilerSource, resolveOndaExecutable } from "./ondaExecutable";
 import { mergeRunDependencies, normalizeRunPath, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
 import { RunFileWatcher } from "./runFileWatcher";
+import { LanguageDependencies } from "./languageDependencies";
 import {
   COMPUTER_KEYBOARD_MIDI_INPUT,
   NO_MIDI_CAPABILITIES,
@@ -38,7 +43,6 @@ import {
   runMidiNoteEvent,
 } from "./runMidi";
 
-type RunScalarValue = boolean | number | null;
 type RunEventValue =
   | boolean
   | number
@@ -155,8 +159,10 @@ interface PendingControlRequest {
   reject: (error: Error) => void;
 }
 
+class RunControlCancelled extends Error {}
+
 let client: LanguageClient | undefined;
-let languageFileWatchers: vscode.FileSystemWatcher[] = [];
+let languageDependencies: LanguageDependencies | undefined;
 let clientRestart: Promise<void> = Promise.resolve();
 let extensionDeactivated = false;
 let extensionContext: vscode.ExtensionContext | undefined;
@@ -166,6 +172,7 @@ let activeRunConfiguration: RunProcessConfiguration | undefined;
 let runAudioOverrides: { sampleRateHz?: number; blockFrames?: number } = {};
 let runProcessingRequested = false;
 let runRequestId = 0;
+let cancelRunMetadata: (() => void) | undefined;
 // Pending/canceled Run requests do not replace the active event schema.
 let runEngineGeneration = 0;
 let runTransportUpdateId = 0;
@@ -182,6 +189,7 @@ let runControlSocket: net.Socket | undefined;
 let runControlBuffer = "";
 let runStdoutBuffer = "";
 let runControlRequestId = 0;
+let runParamResetId = 0;
 let stoppingRunPid: number | undefined;
 const pendingRunRequests = new Map<number, PendingControlRequest>();
 const runKillTimers = new Map<number, NodeJS.Timeout>();
@@ -208,6 +216,8 @@ const RUN_SAMPLE_COUNTER_MAX = Number(
 let paramSmoothingUpdateId = 0;
 let confirmedParamSmoothing = { id: 0, milliseconds: DEFAULT_PARAM_SMOOTHING_MS };
 const preservedRunBufferBindings = new Map<string, string | null>();
+const runBufferBindingUpdates = new Map<string, number>();
+const pendingRunBufferBindings = new Map<string, { filePath: string | null }>();
 let runPanelState: RunPanelState = {
   ...initialRunLogState(),
   running: false,
@@ -237,11 +247,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   runOutput = vscode.window.createOutputChannel("Onda Run");
   projectOutput = vscode.window.createOutputChannel("Onda Projects");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
-  languageFileWatchers = [
-    vscode.workspace.createFileSystemWatcher("**/*.onda"),
-    vscode.workspace.createFileSystemWatcher("**/*.on"),
-  ];
-  context.subscriptions.push(runOutput, projectOutput, serverOutput, ...languageFileWatchers);
+  context.subscriptions.push(runOutput, projectOutput, serverOutput);
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (event) => {
     if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
     if (event.affectsConfiguration("onda.run.sampleRate")) delete runAudioOverrides.sampleRateHz;
@@ -293,11 +299,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export async function deactivate(): Promise<void> {
   extensionDeactivated = true;
+  ++runRequestId;
+  cancelRunMetadata?.();
   await clientRestart;
   await stopClient();
 }
 
 async function stopClient(): Promise<void> {
+  languageDependencies?.dispose();
+  languageDependencies = undefined;
   disposeRunFileWatcher();
   await stopFile({ silent: true });
 
@@ -335,6 +345,7 @@ async function runFile(
   options?: { restart?: boolean; fastMath?: boolean; preserveFocus?: boolean; saveInput?: boolean },
 ): Promise<void> {
   const requestId = ++runRequestId;
+  cancelRunMetadata?.();
   const input = await resolveRunPath(preferredInput, options?.saveInput ?? true);
   if (!input || requestId !== runRequestId) {
     return;
@@ -344,6 +355,8 @@ async function runFile(
   if (!preserveRunState) {
     disposeRunFileWatcher();
     preservedRunBufferBindings.clear();
+    runBufferBindingUpdates.clear();
+    pendingRunBufferBindings.clear();
     runSourceFiles = new Set([path.resolve(fsPath)]);
   }
   const { sampleRateHz, blockFrames, args: audioArgs } = ondaRunAudioSettings();
@@ -415,7 +428,7 @@ async function runFile(
   };
 
   const { command, extraArgs, source } = ondaExecutableConfig();
-  const args = [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources"];
+  const args = [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources", "--start-paused"];
   args.push(
     ...audioArgs,
     "--param-smoothing-ms",
@@ -451,6 +464,8 @@ async function runFile(
   activeRunConfiguration = desiredRunConfiguration;
   runStdoutBuffer = "";
   let runStderrBuffer = "";
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
 
   runOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
   revealRunPanel(preserveFocus);
@@ -459,10 +474,10 @@ async function runFile(
     if (runProcess !== child) {
       return;
     }
-    handleRunStdout(chunk.toString());
+    handleRunStdout(stdoutDecoder.write(chunk));
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    const text = chunk.toString();
+    const text = stderrDecoder.write(chunk);
     runStderrBuffer += text;
     runOutput?.append(text);
   });
@@ -491,7 +506,7 @@ async function runFile(
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
     const finishedPath = fsPath;
-    clearRunKillTimer(child.pid);
+    clearRunKillTimerIfGroupExited(child.pid);
     const expectedStop = child.pid !== undefined && stoppingRunPid === child.pid;
     if (expectedStop) {
       stoppingRunPid = undefined;
@@ -543,6 +558,8 @@ async function setRunProcessing(playing: boolean): Promise<void> {
   const requestId = runRequestId;
   const updateId = ++runTransportUpdateId;
   runProcessingRequested = playing;
+  // Startup will honor the latest intent after controls and bindings are restored.
+  if (playing && !runSchemaReady) return;
   try {
     await sendRunControlRequest(playing ? "play" : "pause");
     // Reusing this process for another Run leaves its pending transport valid.
@@ -587,6 +604,7 @@ async function stopFile(options?: {
   runFailureMessage?.dispose();
   runFailureMessage = undefined;
   if (!options?.preservePendingStart) ++runRequestId;
+  cancelRunMetadata?.();
   ++runTransportUpdateId;
   if (!runProcess) {
     runProcessingRequested = false;
@@ -670,12 +688,13 @@ function terminateRunProcessTree(child: childProcess.ChildProcessWithoutNullStre
 }
 
 function terminateUnixRunProcess(pid: number): void {
-  const groupPid = -pid;
+  let targetPid = -pid;
   try {
-    process.kill(groupPid, "SIGTERM");
+    process.kill(targetPid, "SIGTERM");
   } catch {
+    targetPid = pid;
     try {
-      process.kill(pid, "SIGTERM");
+      process.kill(targetPid, "SIGTERM");
     } catch {
       return;
     }
@@ -685,17 +704,23 @@ function terminateUnixRunProcess(pid: number): void {
   const timer = setTimeout(() => {
     runKillTimers.delete(pid);
     try {
-      process.kill(groupPid, "SIGKILL");
+      process.kill(targetPid, "SIGKILL");
     } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Ignore termination errors for already-exited children.
-      }
+      // Ignore termination errors for already-exited processes.
     }
   }, RUN_FORCE_KILL_DELAY_MS);
   timer.unref();
   runKillTimers.set(pid, timer);
+}
+
+function clearRunKillTimerIfGroupExited(pid: number | undefined): void {
+  if (pid === undefined || !runKillTimers.has(pid)) return;
+  // A launcher can exit and close its pipes while descendants still need killing.
+  try {
+    process.kill(-pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") clearRunKillTimer(pid);
+  }
 }
 
 function clearRunKillTimer(pid: number | undefined): void {
@@ -1022,8 +1047,8 @@ function validateProjectName(value: string): string | undefined {
   if (name.length === 0) {
     return "Enter a project name.";
   }
-  if (Buffer.byteLength(name, "utf8") > 255) {
-    return "The project name must be at most 255 UTF-8 bytes.";
+  if (Buffer.byteLength(projectManifestName(name), "utf8") > 255) {
+    return "The project name, including .ondaproject, must be at most 255 UTF-8 bytes.";
   }
   if (
     /[<>:"|?*\\/\u0000-\u001f]/.test(name)
@@ -1036,7 +1061,7 @@ function validateProjectName(value: string): string | undefined {
     return "The project name cannot end with a dot or space.";
   }
   const stem = name.split(".", 1)[0].toUpperCase();
-  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) {
+  if (/^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$/.test(stem)) {
     return "That project name is reserved on Windows.";
   }
   return undefined;
@@ -1115,11 +1140,11 @@ async function offerToOpenProject(destination: vscode.Uri, verb: string): Promis
 }
 
 function projectManifestUri(destination: vscode.Uri): vscode.Uri {
-  const destinationName = path.basename(destination.fsPath);
-  const manifestName = isOndaProjectPath(destinationName)
-    ? destinationName
-    : `${destinationName}.ondaproject`;
-  return vscode.Uri.joinPath(destination, manifestName);
+  return vscode.Uri.joinPath(destination, projectManifestName(path.basename(destination.fsPath)));
+}
+
+function projectManifestName(name: string): string {
+  return isOndaProjectPath(name) ? name : `${name}.ondaproject`;
 }
 
 function trimRunErrorText(text: string, maxChars = 4000): string | undefined {
@@ -1216,18 +1241,46 @@ async function loadStoppedRunMetadata(
   fsPath: string,
   onSources?: (graph: unknown) => void,
 ): Promise<RunStoppedMetadata> {
-  const { command, extraArgs, source } = ondaExecutableConfig();
+  cancelRunMetadata?.();
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  cancelRunMetadata = cancel;
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
-  const fastMath = runPanelState.fastMath;
-  const paramSmoothingSeconds = runPanelState.paramSmoothingMs / 1000;
-  const cwd =
-    vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
+  try {
+    return await withOndaDaemon(fsPath, controller.signal, async (request) => {
+      onSources?.(await request("run_sources", { path: fsPath }));
+      await request("initialize", {
+        sample_rate_hz: sampleRateHz,
+        block_samples: blockFrames,
+        fast_math: runPanelState.fastMath,
+        param_smoothing_seconds: runPanelState.paramSmoothingMs / 1000,
+      });
+      return await request("run_metadata", { path: fsPath }) ?? {};
+    }, onSources);
+  } finally {
+    if (cancelRunMetadata === cancel) cancelRunMetadata = undefined;
+  }
+}
+
+type DaemonRequest = (command: string, payload?: Record<string, unknown>) => Promise<any>;
+
+/** Share the daemon framing and process cleanup between playback metadata and LSP discovery. */
+async function withOndaDaemon<T>(
+  fsPath: string,
+  signal: AbortSignal,
+  operation: (request: DaemonRequest) => Promise<T>,
+  onSources?: (graph: unknown) => void,
+): Promise<T> {
+  const { command, extraArgs, source } = ondaExecutableConfig();
+  const cwd = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
+  if (signal.aborted) throw new Error("Metadata refresh canceled.");
 
   return await new Promise((resolve, reject) => {
     const child = childProcess.spawn(command, [...extraArgs, "daemon", "stdio"], {
       cwd,
       stdio: "pipe",
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
 
     let stdoutBuffer = "";
@@ -1241,6 +1294,10 @@ async function loadStoppedRunMetadata(
         return;
       }
       settled = true;
+      signal.removeEventListener("abort", cancel);
+      for (const request of pending.values()) {
+        request.reject(new Error("Metadata refresh ended."));
+      }
       pending.clear();
       try {
         child.stdin.end();
@@ -1248,7 +1305,7 @@ async function loadStoppedRunMetadata(
         // Ignore stdin close errors during shutdown.
       }
       try {
-        child.kill();
+        terminateRunProcessTree(child);
       } catch {
         // Ignore termination errors for already-exited children.
       }
@@ -1258,8 +1315,12 @@ async function loadStoppedRunMetadata(
     const fail = (message: string) => {
       finish(() => reject(new Error(message)));
     };
+    const cancel = () => fail("Metadata refresh canceled.");
+    signal.addEventListener("abort", cancel, { once: true });
+    child.stdin.on("error", (error: Error) => fail(error.message));
 
     const sendRequest = (commandName: string, payload?: Record<string, unknown>): Promise<any> => {
+      if (settled) return Promise.reject(new Error("Metadata refresh ended."));
       return new Promise((requestResolve, requestReject) => {
         const id = nextId++;
         pending.set(id, { resolve: requestResolve, reject: requestReject });
@@ -1327,6 +1388,7 @@ async function loadStoppedRunMetadata(
     });
 
     child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      clearRunKillTimerIfGroupExited(child.pid);
       if (settled) {
         return;
       }
@@ -1335,23 +1397,9 @@ async function loadStoppedRunMetadata(
       fail(`daemon metadata refresh exited unexpectedly: ${reason}`);
     });
 
-    void sendRequest("run_sources", { path: fsPath })
-      .then((graph) => {
-        onSources?.(graph);
-        return sendRequest("initialize", {
-          sample_rate_hz: sampleRateHz,
-          block_samples: blockFrames,
-          fast_math: fastMath,
-          param_smoothing_seconds: paramSmoothingSeconds,
-        });
-      })
-      .then(() => sendRequest("run_metadata", { path: fsPath }))
-      .then((result) => {
-        finish(() => resolve(result ?? {}));
-      })
-      .catch((error: Error) => {
-        fail(error.message);
-      });
+    void operation(sendRequest)
+      .then((result) => finish(() => resolve(result)))
+      .catch((error: Error) => fail(error.message));
   });
 }
 
@@ -1453,9 +1501,9 @@ function runParamsMatchForPreservation(
   return (
     next.name === previous.name &&
     next.type === previous.type &&
-    next.default === previous.default &&
-    next.rangeMin === previous.rangeMin &&
-    next.rangeMax === previous.rangeMax &&
+    Object.is(next.default, previous.default) &&
+    Object.is(next.rangeMin, previous.rangeMin) &&
+    Object.is(next.rangeMax, previous.rangeMax) &&
     next.scale === previous.scale &&
     next.curve === previous.curve &&
     next.unit === previous.unit &&
@@ -1477,7 +1525,10 @@ function mergeRunEvents(
 ): RunEventState[] {
   return events.map((event) => {
     const previous = existing.find((item) => item.name === event.name);
-    const args = event.args ?? [];
+    const args = (event.args ?? []).map((arg) => ({
+      ...arg,
+      default: arg.default == null ? arg.default : cloneRunEventValue(arg.default),
+    }));
     const compatible = previous?.args.length === args.length && args.every((arg, index) => {
       const old = previous.args[index];
       return old.name === arg.name && old.type === arg.type
@@ -1498,6 +1549,7 @@ function connectRunControl(port: number): void {
   closeRunControlSocket();
 
   const socket = net.createConnection({ host: "127.0.0.1", port });
+  let connectionError: Error | undefined;
   runControlSocket = socket;
   runControlBuffer = "";
 
@@ -1518,12 +1570,31 @@ function connectRunControl(port: number): void {
       refreshRunBuffers(),
       refreshRunEvents(),
       refreshRunDevices(),
-    ]).then(() => {
+    ]).then(async () => {
       if (runControlSocket !== socket) return;
+      if (runPanelState.error) throw new Error(runPanelState.error);
+      await reapplyCachedRunParams();
+      if (runControlSocket !== socket) return;
+      await reapplyCachedRunBuffers();
+      if (runControlSocket !== socket) return;
+      if (runPanelState.error) throw new Error(runPanelState.error);
       runSchemaReady = true;
       postRunPanelState();
-      reapplyCachedRunParams();
-      reapplyCachedRunBuffers();
+      // Onda's play command rebuilds the instance with the restored targets and
+      // bindings, so initialization and the first block see the same values.
+      if (runProcessingRequested) await playRunProcessing();
+    }).catch(async (error) => {
+      if (runControlSocket !== socket) return;
+      // A retry must restore again rather than play an incompletely prepared instance.
+      const stopped = stopFile({ silent: true });
+      const requestId = runRequestId;
+      await stopped;
+      if (requestId !== runRequestId) return;
+      runPanelState = {
+        ...runPanelState,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      postRunPanelState();
     });
     if (runPanelState.running) {
       startScopePolling();
@@ -1546,25 +1617,17 @@ function connectRunControl(port: number): void {
     }
   });
   socket.on("error", (error: Error) => {
-    if (runControlSocket !== socket) return;
-    stopScopePolling();
-    runPanelState = {
-      ...runPanelState,
-      connected: false,
-      error: error.message,
-    };
-    postRunPanelState();
+    connectionError = error;
   });
   socket.on("close", () => {
     if (runControlSocket !== socket) return;
-    runSchemaReady = true;
-    stopScopePolling();
-    runControlSocket = undefined;
-    runControlBuffer = "";
-    rejectPendingRunRequests(new Error("Run control connection closed."));
+    // Stop the disconnected process without canceling a newer Run awaiting its input.
+    void stopFile({ silent: true, preservePendingStart: true });
     runPanelState = {
       ...runPanelState,
-      connected: false,
+      error: "Onda playback stopped because its control connection "
+        + (connectionError ? `failed (${connectionError.message}). ` : "closed unexpectedly. ")
+        + "Run again to restart playback.",
     };
     postRunPanelState();
   });
@@ -1572,6 +1635,12 @@ function connectRunControl(port: number): void {
 
 function closeRunControlSocket(): void {
   stopScopePolling();
+  // Recompile/disconnect may interrupt loading. Replay the latest edit on the
+  // replacement instance rather than falling back to the last acknowledged file.
+  for (const [name, binding] of pendingRunBufferBindings) {
+    preservedRunBufferBindings.set(name, binding.filePath);
+  }
+  pendingRunBufferBindings.clear();
   const socket = runControlSocket;
   runControlSocket = undefined;
   runControlBuffer = "";
@@ -1586,6 +1655,7 @@ function handleRunControlLine(line: string): void {
     ok?: boolean;
     result?: unknown;
     error?: string;
+    cancelled?: boolean;
   };
   const logState = applyRunOutputNotification(
     runPanelState,
@@ -1608,7 +1678,9 @@ function handleRunControlLine(line: string): void {
     return;
   }
   pendingRunRequests.delete(payload.id);
-  if (payload.ok) {
+  if (payload.cancelled) {
+    pending.reject(new RunControlCancelled("Run control request was superseded."));
+  } else if (payload.ok) {
     pending.resolve(payload.result);
   } else {
     pending.reject(new Error(payload.error ?? "Run control request failed."));
@@ -1702,22 +1774,27 @@ async function refreshRunEvents(): Promise<void> {
 }
 
 async function reapplyCachedRunParams(): Promise<void> {
-  for (const param of runPanelState.params) {
-    if (param.value === null) {
-      continue;
-    }
-    queueRunParamSend(param.name, param.value);
-  }
+  await Promise.all(runPanelState.params
+    .filter((param) => param.value !== null)
+    .map((param) => sendRunControlRequest("setParam", { name: param.name, value: param.value })));
 }
 
-function reapplyCachedRunBuffers(): void {
+async function reapplyCachedRunBuffers(): Promise<void> {
+  const socket = runControlSocket;
   const declaredBuffers = new Set(runPanelState.buffers.map((buffer) => buffer.name));
-  for (const [name, filePath] of preservedRunBufferBindings) {
-    if (!declaredBuffers.has(name)) {
-      continue;
-    }
-    if (filePath === null) void clearRunBuffer(name);
-    else void bindRunBufferFile(name, filePath, { silent: true });
+  const restored = new Map<string, string | null>();
+  while (socket === runControlSocket) {
+    const bindings = [...preservedRunBufferBindings].filter(([name, filePath]) =>
+      declaredBuffers.has(name) && (!restored.has(name) || restored.get(name) !== filePath)
+    );
+    if (!bindings.length) return;
+    await Promise.all(bindings.map(async ([name, filePath]) => {
+      await sendRunBufferBinding(name, filePath);
+      restored.set(name, filePath);
+    }));
+    if (socket !== runControlSocket) return;
+    await refreshRunBuffers();
+    // Edits made while a file was loading are cached and restored on this pass.
   }
 }
 
@@ -1742,65 +1819,22 @@ function updateRunParamState(
   return nextParam;
 }
 
-function declaredParamDefaultValue(
-  param: Pick<RunParamPayload, "type" | "default" | "rangeMin">,
-): RunScalarValue {
-  if (param.type === "bool") {
-    if (param.default !== null && param.default !== undefined) {
-      return param.default !== 0;
-    }
-    return false;
-  }
-  if (param.default !== null && param.default !== undefined) {
-    return param.default;
-  }
-  if (param.rangeMin !== null && param.rangeMin !== undefined) {
-    return param.rangeMin;
-  }
-  return 0;
-}
-
 function initialEventArgValue(
   arg: Pick<RunEventArgPayload, "type" | "default" | "value">,
 ): RunEventValue {
-  if (!/^(?:f32|f64|i32|i64|bool)(?:\[[0-9]*\])?$/.test(arg.type)) {
-    return cloneRunEventValue(arg.default ?? arg.value ?? {});
-  }
-  if (Array.isArray(arg.default)) {
-    return arg.default.map(cloneRunEventValue);
-  }
-  if (arg.default !== null && arg.default !== undefined) {
-    if (arg.type === "bool") {
-      return Boolean(arg.default);
-    }
-    if (arg.type === "i64") {
-      return String(arg.default);
-    }
-    const defaultValue = Number(arg.default);
-    return Number.isFinite(defaultValue) ? defaultValue : 0;
-  }
-  if (arg.type === "bool") {
-    if (arg.value !== null && arg.value !== undefined) {
-      if (Array.isArray(arg.value)) {
-        return arg.value.map(cloneRunEventValue);
-      }
-      return arg.value !== 0;
-    }
-    return false;
-  }
-  if (Array.isArray(arg.value)) {
-    return arg.value.map(cloneRunEventValue);
-  }
-  if (arg.value !== null && arg.value !== undefined) {
-    if (arg.type === "i64") {
-      return String(arg.value);
-    }
-    return arg.value;
-  }
+  // Onda supplies the complete logical default, including structured payloads.
+  const value = arg.default ?? arg.value;
+  if (value !== null && value !== undefined) return cloneRunEventValue(value);
+  if (arg.type === "bool") return false;
+  if (!/^(?:f32|f64|i32|i64)$/.test(arg.type)) return {};
   return arg.type === "i64" ? "0" : 0;
 }
 
 function cloneRunEventValue(value: RunEventValue): RunEventValue {
+  // Keep special floats intact across VS Code's JSON message serialization.
+  if (typeof value === "number") {
+    return wireRunFloat(value);
+  }
   if (Array.isArray(value)) {
     return value.map(cloneRunEventValue);
   }
@@ -1810,10 +1844,6 @@ function cloneRunEventValue(value: RunEventValue): RunEventValue {
     );
   }
   return value;
-}
-
-function runParamDefaultValue(param: RunParamState): RunScalarValue {
-  return declaredParamDefaultValue(param);
 }
 
 function queueRunParamSend(name: string, value: RunScalarValue): void {
@@ -1882,6 +1912,7 @@ function applyRunParamChange(name: string, value: RunScalarValue): void {
   if (value === null) {
     return;
   }
+  if (typeof value === "number") value = wireRunFloat(value);
   const param = updateRunParamState(name, (current) => ({
     ...current,
     value,
@@ -1970,15 +2001,16 @@ function postRunParameterValues(params: RunParamState[]): void {
   });
 }
 
-function resetRunParams(): void {
+async function resetRunParams(): Promise<void> {
   clearRunParamDisrun();
+  const resetId = ++runParamResetId;
+  const socket = runControlSocket;
+  const previous = runPanelState.params;
+  const params = previous.map((param) => ({ ...param, value: defaultRunParamValue(param) }));
   runPanelState = {
     ...runPanelState,
     error: undefined,
-    params: runPanelState.params.map((param) => ({
-      ...param,
-      value: runParamDefaultValue(param),
-    })),
+    params,
   };
   postRunParameterValues(runPanelState.params);
   postRunPanelState();
@@ -1987,8 +2019,17 @@ function resetRunParams(): void {
     return;
   }
 
-  for (const param of runPanelState.params) {
-    queueRunParamSend(param.name, param.value);
+  try {
+    await sendRunControlRequest("resetParams");
+  } catch (error) {
+    if (socket !== runControlSocket || resetId !== runParamResetId) return;
+    runPanelState = {
+      ...runPanelState,
+      // Preserve edits made while the reset was awaiting its acknowledgement.
+      params: runPanelState.params === params ? previous : runPanelState.params,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    postRunPanelState();
   }
 }
 
@@ -2024,9 +2065,11 @@ async function setRunBufferBinding(
   filePath: string | null,
   options?: { silent?: boolean },
 ): Promise<void> {
-  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed) {
+  const updateId = (runBufferBindingUpdates.get(name) ?? 0) + 1;
+  runBufferBindingUpdates.set(name, updateId);
+  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed || !runSchemaReady) {
     if (!runPanelState.buffers.some((buffer) => buffer.name === name)) return;
-    // Stopped saves close the audio process. Retain edits for the next Play.
+    // Retain edits while stopped or restoring, before the next Play.
     preservedRunBufferBindings.set(name, filePath);
     runPanelState = {
       ...runPanelState,
@@ -2037,12 +2080,11 @@ async function setRunBufferBinding(
     return;
   }
   const socket = runControlSocket;
+  const pending = { filePath };
+  pendingRunBufferBindings.set(name, pending);
   try {
-    await sendRunControlRequest(
-      filePath === null ? "clearBuffer" : "bindBufferWav",
-      filePath === null ? { name } : { name, path: filePath },
-    );
-    if (socket !== runControlSocket) return;
+    await sendRunBufferBinding(name, filePath);
+    if (socket !== runControlSocket || updateId !== runBufferBindingUpdates.get(name)) return;
     preservedRunBufferBindings.set(name, filePath);
     runPanelState = {
       ...runPanelState,
@@ -2050,7 +2092,8 @@ async function setRunBufferBinding(
     };
     await refreshRunBuffers();
   } catch (error) {
-    if (socket !== runControlSocket) return;
+    if (socket !== runControlSocket || updateId !== runBufferBindingUpdates.get(name)
+      || error instanceof RunControlCancelled) return;
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
       ...runPanelState,
@@ -2060,7 +2103,16 @@ async function setRunBufferBinding(
     if (!options?.silent) {
       void vscode.window.showErrorMessage(`Failed to bind run buffer '${name}': ${message}`);
     }
+  } finally {
+    if (pendingRunBufferBindings.get(name) === pending) pendingRunBufferBindings.delete(name);
   }
+}
+
+function sendRunBufferBinding(name: string, filePath: string | null): Promise<void> {
+  return sendRunControlRequest(
+    filePath === null ? "clearBuffer" : "bindBufferWav",
+    filePath === null ? { name } : { name, path: filePath },
+  );
 }
 
 async function chooseRunBufferFile(name: string): Promise<void> {
@@ -2086,6 +2138,8 @@ function clearRunPanelMemory(): void {
   runSourceFiles.clear();
   clearRunParamDisrun();
   preservedRunBufferBindings.clear();
+  runBufferBindingUpdates.clear();
+  pendingRunBufferBindings.clear();
   runPanelState = {
     ...runPanelState,
     ...initialRunLogState(),
@@ -2324,7 +2378,7 @@ function ensureRunPanel(preserveFocus = false): void {
         await pauseRunProcessing();
         break;
       case "resetParams":
-        resetRunParams();
+        await resetRunParams();
         break;
       case "resetEventArguments":
         resetRunEventArguments();
@@ -2607,20 +2661,44 @@ async function startClient(): Promise<void> {
     },
   };
 
+  const dependencies = new LanguageDependencies(
+    (file, signal) => withOndaDaemon(file, signal, request => request("run_sources", { path: file })),
+    (files) => {
+      void activeClient.sendNotification("workspace/didChangeWatchedFiles", {
+        changes: files.map(file => ({ uri: vscode.Uri.file(file).toString(), type: 2 })),
+      }).catch(error => serverOutput?.appendLine(`Could not notify Onda of source changes: ${error}`));
+    },
+    (file, error) => serverOutput?.appendLine(`Could not watch Onda dependencies for ${file}: ${String(error)}`),
+  );
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "onda" }],
-    synchronize: {
-      fileEvents: languageFileWatchers,
+    middleware: {
+      didOpen: async (document, next) => {
+        await next(document);
+        void dependencies.open(document.uri.fsPath);
+      },
+      didSave: async (document, next) => {
+        await next(document);
+        void dependencies.open(document.uri.fsPath);
+      },
+      didClose: async (document, next) => {
+        dependencies.close(document.uri.fsPath);
+        await next(document);
+      },
     },
     outputChannel: serverOutput,
     traceOutputChannel: serverOutput,
   };
 
-  client = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
+  const activeClient = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
+  client = activeClient;
+  languageDependencies = dependencies;
   try {
-    await client.start();
+    await activeClient.start();
     postRunPanelState();
   } catch (error) {
+    dependencies.dispose();
+    languageDependencies = undefined;
     client = undefined;
     const description = describeOndaExecutableError(command, error, source);
     serverOutput?.appendLine(`Failed to start: ${description.message}`);

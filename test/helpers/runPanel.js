@@ -6,12 +6,12 @@ const { afterEach } = require("node:test");
 
 const panels = new Set();
 afterEach(() => {
-  for (const panel of panels) panel.evaluate("disposeRunFileWatcher(); stopScopePolling()");
+  for (const panel of panels) panel.evaluate("disposeRunFileWatcher(); stopScopePolling(); languageDependencies?.dispose()");
   panels.clear();
 });
 
-function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings = {}, modules = {} } = {}) {
-  const extensionPath = path.join(__dirname, "..", "..", "out", "extension.js");
+function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings = {}, modules = {}, extensionDirectory = path.join(__dirname, "..", "..") } = {}) {
+  const extensionPath = path.join(extensionDirectory, "out", "extension.js");
   const extensionRequire = createRequire(extensionPath);
   const messages = [];
   const panelReveals = [];
@@ -30,8 +30,11 @@ function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings =
     extensionRoot: path.dirname(path.dirname(extensionPath)),
     __dirname: path.dirname(extensionPath),
     process,
+    setTimeout,
+    clearTimeout,
     setInterval,
     clearInterval,
+    AbortController,
     require(name) {
       if (name in modules) return modules[name];
       if (name === "vscode") return {

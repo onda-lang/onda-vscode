@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -13,7 +13,7 @@ const binary = process.argv[2];
 const vsix = process.argv[3];
 assert.ok(binary, 'Usage: npm run test:gpu-host -- <bundled|/path/to/onda> [package.vsix]');
 const code = vscodeCli();
-const root = await mkdtemp(join(tmpdir(), 'onda-vscode-gpu-'));
+const root = await realpath(await mkdtemp(join(tmpdir(), 'onda-vscode-gpu-')));
 let developmentPath = extension;
 if (vsix) {
   const installed = spawnSync(code.command, [...code.args, '--no-sandbox',
@@ -26,12 +26,24 @@ if (vsix) {
   developmentPath = join(root, 'extensions', directory);
 }
 await mkdir(join(root, 'workspace', '.vscode'), { recursive: true });
+await mkdir(join(root, 'secondary'), { recursive: true });
+const workspace = join(root, 'host.code-workspace');
+await writeFile(workspace, JSON.stringify({
+  folders: [{ path: 'workspace' }, { path: 'secondary' }],
+  settings: {
+    'onda.compiler.source': binary === 'bundled' ? 'bundled' : 'external',
+    ...(binary === 'bundled' ? {} : { 'onda.server.path': resolve(binary) }),
+    'onda.run.theme': 'light',
+    'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
+    'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',
+  },
+}));
+// Folder overrides must neither change scoped configuration nor make language
+// services and playback choose different compilers.
 await writeFile(join(root, 'workspace', '.vscode', 'settings.json'), JSON.stringify({
-  'onda.compiler.source': binary === 'bundled' ? 'bundled' : 'external',
-  ...(binary === 'bundled' ? {} : { 'onda.server.path': resolve(binary) }),
-  'onda.run.theme': 'light',
-  'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
-  'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',
+  'onda.compiler.source': binary === 'bundled' ? 'external' : 'bundled',
+  'onda.server.path': join(root, 'folder-compiler-must-not-run'),
+  'onda.server.args': ['--folder-argument-must-not-run'],
 }));
 const fixture = (frequency, label = 'High-pass') => `enum Mode:\n  LowPass\n  HighPass {label = "${label}"}\nenum One:\n  Only\nparams:\n  freq = ${frequency}.0 {20.0, 20000.0}\n  mode = Mode::HighPass\n  fixed = One::Only\ninit:\n  phase = 0.0\n  previous = -1.0\nblock:\n  if freq != previous:\n    print(freq)\n    previous = freq\nsample:\n  out1 = sin(phase) * 0.00001\n  out2 = sin(phase) * 0.00001\n  phase = (phase + freq * TWO_PI / SR) % TWO_PI\n`;
 const source = join(root, 'workspace', 'host.onda');
@@ -45,7 +57,7 @@ const child = spawn(code.command, [...code.args, '--wait', '--no-sandbox', '--di
   '--disable-workspace-trust', '--new-window', `--user-data-dir=${join(root, 'profile')}`,
   `--extensions-dir=${join(root, 'extensions')}`, `--extensionDevelopmentPath=${developmentPath}`,
   `--extensionTestsPath=${join(extension, 'test', 'host', 'gpu.js')}`, `--remote-debugging-port=${port}`,
-  join(root, 'workspace')], { env: { ...code.env, ONDA_GPU_HOST_TEST_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'] });
+  workspace], { env: { ...code.env, ONDA_GPU_HOST_TEST_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'] });
 child.stdout.on('data', chunk => { log = (log + chunk).slice(-16000); });
 child.stderr.on('data', chunk => { log = (log + chunk).slice(-16000); });
 const ended = once(child, 'exit');
@@ -120,21 +132,50 @@ try {
   const frameId = tree.frameTree.childFrames[0].frame.id;
   page.canvasContext = page.contexts.find(c => c.auxData?.isDefault && c.auxData?.frameId === frameId)?.id;
   assert.ok(page.canvasContext, 'Canvas execution context must exist');
-  const sizeBeforeResize = await page.canvas(`[document.querySelector('canvas').width,document.querySelector('canvas').height]`);
-  await page.canvas(`window.originalRAF=requestAnimationFrame;window.delayedFrames=[];
-    window.requestAnimationFrame=cb=>(delayedFrames.push(cb),10000+delayedFrames.length)`);
-  await page.evaluate(`document.querySelector('iframe').style.width='65%'`);
-  await until(() => page.canvas(`delayedFrames.length>0 &&
-    Math.round(document.querySelector('canvas').clientWidth*devicePixelRatio)!==${sizeBeforeResize[0]}`), 'webview resize before drawing');
-  assert.deepEqual(await page.canvas(`[document.querySelector('canvas').width,document.querySelector('canvas').height]`),
-    sizeBeforeResize, 'Resizing the webview must retain its previous backing store until drawing');
-  await page.canvas(`window.requestAnimationFrame=originalRAF;
-    for(const callback of delayedFrames)originalRAF(callback);
-    new Promise(r=>originalRAF(()=>originalRAF(r)))`);
-  assert.equal(await page.canvas(`document.querySelector('canvas').width===Math.round(document.querySelector('canvas').clientWidth*devicePixelRatio)`),
-    true, 'The replacement frame must use the resized webview dimensions');
-  await page.evaluate(`document.querySelector('iframe').style.width=''`);
-  await page.canvas('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+  const originalFrame = await page.evaluate(`(() => {
+    const frame=document.querySelector('iframe');
+    return {style:frame.style.width,width:frame.getBoundingClientRect().width};
+  })()`);
+  const canvasSettled = () => page.canvas(`(() => {
+    const canvas=document.querySelector('canvas');
+    return canvas.width===Math.round(canvas.clientWidth*devicePixelRatio) &&
+      canvas.height===Math.round(canvas.clientHeight*devicePixelRatio);
+  })()`);
+  // Exercise both shrink and grow. An arbitrary percentage can equal the
+  // initial 300px backing store before the first presentation has completed.
+  for (const fraction of [0.65, 0.85]) {
+    await until(canvasSettled, 'canvas presentation before resizing');
+    const sizeBeforeResize = await page.canvas(`new Promise(resolve => {
+      window.originalRAF=requestAnimationFrame;window.delayedFrames=[];
+      window.holdResizeFrames=false;
+      window.requestAnimationFrame=callback=>originalRAF(time=>{
+        if(holdResizeFrames)delayedFrames.push(callback);else callback(time);
+      });
+      // Drain callbacks requested before installing the gate. Later callbacks,
+      // including those already queued when we freeze, must all pass through it.
+      originalRAF(()=>originalRAF(()=>{
+        holdResizeFrames=true;
+        const canvas=document.querySelector('canvas');resolve([canvas.width,canvas.height]);
+      }));
+    })`);
+    try {
+      const width = Math.floor(originalFrame.width * fraction);
+      assert.notEqual(Math.round(width * await page.canvas('devicePixelRatio')), sizeBeforeResize[0],
+        'The resize must request a different size');
+      await page.evaluate(`document.querySelector('iframe').style.width='${width}px'`);
+      await until(() => page.canvas(`delayedFrames.length>0 &&
+        Math.round(document.querySelector('canvas').clientWidth*devicePixelRatio)!==${sizeBeforeResize[0]}`), 'webview resize before drawing');
+      assert.deepEqual(await page.canvas(`[document.querySelector('canvas').width,document.querySelector('canvas').height]`),
+        sizeBeforeResize, 'Resizing the webview must retain its previous backing store until drawing');
+    } finally {
+      await page.canvas(`window.holdResizeFrames=false;window.requestAnimationFrame=originalRAF;
+        for(const callback of delayedFrames.splice(0))originalRAF(callback)`);
+    }
+    await until(canvasSettled, 'resized canvas presentation');
+  }
+  await page.evaluate(`document.querySelector('iframe').style.width=${JSON.stringify(originalFrame.style)}`);
+  await until(async () => await page.canvas('innerWidth') === Math.round(originalFrame.width)
+    && await canvasSettled(), 'restored webview dimensions');
   await page.canvas(`(async () => {
     const { CanvasUi } = await import(new URL('./pkg/onda_ui.js', document.querySelector('script[src]').src));
     window.probe = { packets: 0, messages: [], inputs: [], commands: [] };
@@ -242,8 +283,10 @@ try {
   await until(() => page.canvas(`probe.messages.some(m => m.state?.params?.some(p =>
     p.name === 'mode' && p.enumeration?.members[1].label === 'Bright'))`), 'reloaded enum labels');
   assert.equal(await page.canvas('document.querySelector("#status").hidden'), true, 'Renderer must remain healthy');
-  await writeFile(join(root, 'result.json'), JSON.stringify({ passed: true, scope, extension: developmentPath, vsix: vsix ? resolve(vsix) : null,
-    checks: ['real extension host', 'real playback', 'enum choices and singleton metadata', 'enum label reload', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'binary theme choices independent of workbench appearance', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
+  const language = JSON.parse(await readFile(join(root, 'language-result.json'), 'utf8'));
+  assert.equal(language.passed, true, 'External dependency diagnostics must pass in the real extension host');
+  await writeFile(join(root, 'result.json'), JSON.stringify({ passed: true, scope, language, extension: developmentPath, vsix: vsix ? resolve(vsix) : null,
+    checks: ['real extension host', 'multi-root window compiler selection', 'real playback', 'enum choices and singleton metadata', 'enum label reload', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'binary theme choices independent of workbench appearance', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
   await host('done');
   page.socket.close();
   const [code] = await ended;
@@ -251,7 +294,12 @@ try {
   console.log(`GPU extension host checks passed. Evidence: ${root}/result.json`);
 } catch (error) {
   if (page) {
-    try { await writeFile(join(root, 'failure.json'), JSON.stringify(await page.canvas('({probe,body:document.body.innerText,status:document.querySelector("#status")?.outerHTML})'), null, 2)); }
+    try { await writeFile(join(root, 'failure.json'), JSON.stringify(await page.canvas(`({
+      probe:window.probe,body:document.body.innerText,status:document.querySelector('#status')?.outerHTML,
+      resize:{backing:[document.querySelector('canvas').width,document.querySelector('canvas').height],
+        client:[document.querySelector('canvas').clientWidth,document.querySelector('canvas').clientHeight],
+        scale:devicePixelRatio,delayedFrames:window.delayedFrames?.length,hidden:document.hidden}
+    })`), null, 2)); }
     catch { /* The application may already have exited. */ }
   }
   await host('done', String(error)).catch(() => {});

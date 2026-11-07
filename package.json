@@ -177,16 +177,18 @@
       "properties": {
         "onda.server.path": {
           "type": "string",
-          "scope": "machine-overridable",
-          "description": "Path to the external Onda executable when onda.compiler.source is external. Leave unset to use 'onda' from PATH."
+          "scope": "window",
+          "ignoreSync": true,
+          "description": "Path to the external Onda executable for this VS Code window when onda.compiler.source is external. Set in User or Workspace settings; folder overrides are unsupported. Leave unset to use 'onda' from PATH."
         },
         "onda.server.args": {
           "type": "array",
+          "scope": "window",
           "default": [],
           "items": {
             "type": "string"
           },
-          "description": "Additional arguments passed to the selected Onda compiler before each built-in subcommand."
+          "description": "Additional arguments passed to the selected Onda compiler before each built-in subcommand. Applies to the whole VS Code window."
         },
         "onda.run.theme": {
           "type": ["string", "null"],
@@ -222,8 +224,9 @@
             "Use onda.server.path when configured, otherwise find onda on PATH."
           ],
           "default": "bundled",
-          "scope": "machine-overridable",
-          "description": "Compiler used for language services, playback, and project commands. Changing this restarts the language server and stops active playback."
+          "scope": "window",
+          "ignoreSync": true,
+          "description": "Compiler used for language services, playback, and project commands throughout this VS Code window. Set in User or Workspace settings; folder overrides are unsupported. Changing this restarts the language server and stops active playback."
         }
       }
     }
@@ -241,6 +244,7 @@
     "stage:compiler": "node ./scripts/stage-compiler.mjs",
     "verify:compiler": "node ./scripts/verify-compiler.mjs",
     "test:compiler": "node ./scripts/test-bundled-compiler.mjs",
+    "test:integration": "npm run compile && node ./scripts/test-run-integration.mjs",
     "package:embedded": "node ./scripts/package-embedded.mjs"
   },
   "devDependencies": {

@@ -93,6 +93,7 @@ jobs:
   package:
     needs: gpu-ui
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     env:
       ONDA_VERSION: ${{ needs.gpu-ui.outputs.onda-version }}
     defaults:
@@ -102,6 +103,15 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.gpu-ui.outputs.matrix) }}
     steps:
+      - name: Prepare Debian 12 compiler environment
+        if: runner.os == 'Linux'
+        run: |
+          source /etc/os-release
+          test "$ID:$VERSION_ID" = debian:12
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.36'
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git unzip xz-utils libasound2 libpipewire-0.3-0
       - uses: actions/checkout@v5
         with:
           repository: onda-lang/onda-vscode
@@ -110,11 +120,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - name: Install Linux compiler runtime libraries
-        if: matrix.target == 'linux-x64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libpipewire-0.3-dev
       - run: npm ci
       - name: Download matching shared GPU UI
         uses: actions/download-artifact@v7

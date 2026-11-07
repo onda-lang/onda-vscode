@@ -34,6 +34,30 @@ function run(args) {
   return result.stdout;
 }
 
+function testEventTransport() {
+  const source = join(workspace, "events.onda");
+  writeFileSync(source, "delegate report(value: f64)\nevent echo(value: f64 = -0.0):\n  report(value)\nsample:\n  out1 = 0.0\n");
+  const requests = [
+    {id:1,command:"run_metadata",path:source},
+    {id:2,command:"run_start",path:source},
+    {id:3,command:"run_trigger_event",path:source,name:"echo",values:["-0"]},
+  ];
+  const result = spawnSync(command, ["daemon", "stdio"], {
+    cwd:workspace, env, encoding:"utf8", timeout:30000,
+    input:requests.map(request => JSON.stringify(request) + "\n").join(""),
+  });
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, result.stderr);
+  const replies = result.stdout.trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(replies.length, requests.length);
+  for (let index = 0; index < replies.length; index++) {
+    assert.equal(replies[index].id, index + 1);
+    assert.equal(replies[index].ok, true, JSON.stringify(replies[index]));
+  }
+  assert.equal(replies[0].result.events[0].args[0].default, "-0");
+  assert.equal(replies[2].result.delegate_occurrences[0].values.value, "-0");
+}
+
 async function testLanguageServer() {
   const child = spawn(command, ["lsp"], { cwd: workspace, env, stdio: "pipe" });
   let buffer = Buffer.alloc(0);
@@ -110,6 +134,9 @@ try {
   run(["compile", source, "--emit", "obj", "--output", join(workspace, "sine.o")]);
   assert.ok(statSync(join(workspace, "sine.o")).size > 0);
   writeFileSync(enumSource, enumText);
+  const inputSource = join(workspace, "inputs.onda");
+  writeFileSync(inputSource, "inputs:\n  freq = 440.0 {20.0, 20000.0, ramp = 0.02}\nsample:\n  out1 = freq\n");
+  run(["compile", inputSource]);
   const enumMir = join(workspace, "enums.json");
   run(["compile", enumSource, "--emit", "mir-json", "--output", enumMir]);
   const params = JSON.parse(readFileSync(enumMir, "utf8")).interface.params;
@@ -122,7 +149,8 @@ try {
   run(["project", project, "--from", source]);
   assert.ok(readdirSync(project).some(name => name.endsWith(".ondaproject")));
   await testLanguageServer();
-  console.log(`Bundled Onda ${manifest.version} (${target}): version, stdlib/object compilation, enum metadata, audio render, project export, and LSP enum completion passed with PATH empty.`);
+  testEventTransport();
+  console.log(`Bundled Onda ${manifest.version} (${target}, ${manifest.sha256}): version, stdlib/object compilation, input smoothing, enum metadata, audio render, project export, LSP enum completion, and negative-zero daemon transport passed with PATH empty.`);
 } finally {
   rmSync(workspace, { recursive: true, force: true });
 }

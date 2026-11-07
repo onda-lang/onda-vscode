@@ -11,9 +11,9 @@ async function fixture(t, target = "linux-x64") {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const directory = path.join(root, "compiler", target);
   const bytes = Buffer.alloc(256);
-  if (target === "linux-x64") {
+  if (bundle.compilerTargets[target].format === "elf") {
     bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
-    bytes.writeUInt16LE(62, 18);
+    bytes.writeUInt16LE(bundle.compilerTargets[target].elfMachine, 18);
   } else if (target === "darwin-arm64") {
     bytes.writeUInt32LE(0xfeedfacf, 0);
     bytes.writeUInt32LE(0x0100000c, 4);
@@ -39,7 +39,7 @@ async function fixture(t, target = "linux-x64") {
   return { ...bundle, root, directory, executable, manifest, manifestFile };
 }
 
-for (const target of ["linux-x64", "darwin-arm64", "win32-x64"]) {
+for (const target of ["linux-x64", "linux-arm64", "darwin-arm64", "win32-x64"]) {
   test(`accepts a complete ${target} bundle`, async t => {
     const f = await fixture(t, target);
     assert.deepEqual(f.verifyCompilerBundle(f.root, target), f.manifest);
@@ -48,7 +48,7 @@ for (const target of ["linux-x64", "darwin-arm64", "win32-x64"]) {
 
 test("rejects platforms outside Onda's prebuilt release matrix", async () => {
   const { targetInfo } = await import("../scripts/compiler-bundle.mjs");
-  for (const target of ["darwin-x64", "linux-arm64", "win32-arm64", "alpine-x64", "web", "toString"]) {
+  for (const target of ["darwin-x64", "linux-armhf", "win32-arm64", "alpine-x64", "web", "toString"]) {
     assert.throws(() => targetInfo(target), /Unsupported compiler target/);
   }
 });
@@ -86,10 +86,12 @@ test("rejects missing dependency notices", async t => {
   assert.throws(() => f.verifyCompilerBundle(f.root), /ENOENT/);
 });
 
-test("rejects a binary built for a different architecture", async t => {
-  const f = await fixture(t);
-  const bytes = fs.readFileSync(f.executable);
-  bytes.writeUInt16LE(183, 18); // AArch64 ELF inside an x64 bundle.
-  fs.writeFileSync(f.executable, bytes);
-  assert.throws(() => f.verifyCompilerBundle(f.root), /binary does not match/);
-});
+for (const [target, wrongMachine] of [["linux-x64", 183], ["linux-arm64", 62]]) {
+  test(`rejects a binary built for a different architecture in ${target}`, async t => {
+    const f = await fixture(t, target);
+    const bytes = fs.readFileSync(f.executable);
+    bytes.writeUInt16LE(wrongMachine, 18);
+    fs.writeFileSync(f.executable, bytes);
+    assert.throws(() => f.verifyCompilerBundle(f.root), /binary does not match/);
+  });
+}

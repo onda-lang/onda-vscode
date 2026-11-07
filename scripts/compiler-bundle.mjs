@@ -6,12 +6,14 @@ import { extensionRoot, readOndaVersion } from "./onda-version.mjs";
 
 export { extensionRoot };
 export const compilerVersion = readOndaVersion();
+const linuxContainer = "debian:bookworm@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8";
 
 // Keep this aligned with Onda's prebuilt release matrix.
 export const compilerTargets = {
-  "win32-x64": { release: "windows-x64", executable: "onda.exe", format: "pe", runner: "windows-latest", extension: "zip" },
-  "linux-x64": { release: "linux-x64", executable: "onda", format: "elf", runner: "ubuntu-24.04", extension: "tar.xz" },
-  "darwin-arm64": { release: "macos-arm64", executable: "onda", format: "macho", runner: "macos-latest", extension: "tar.xz" },
+  "win32-x64": { release: "windows-x64", executable: "onda.exe", format: "pe", runner: "windows-2022", container: "", extension: "zip" },
+  "linux-x64": { release: "linux-x64", executable: "onda", format: "elf", elfMachine: 62, runner: "ubuntu-24.04", container: linuxContainer, extension: "tar.xz" },
+  "linux-arm64": { release: "linux-arm64", executable: "onda", format: "elf", elfMachine: 183, runner: "ubuntu-24.04-arm", container: linuxContainer, extension: "tar.xz" },
+  "darwin-arm64": { release: "macos-arm64", executable: "onda", format: "macho", runner: "macos-latest", container: "", extension: "tar.xz" },
 };
 
 const requiredLicenses = [
@@ -42,7 +44,7 @@ export function verifyCompilerFiles(directory, target) {
   const bytes = readFileSync(executable);
   const valid = info.format === "elf"
     ? bytes.length >= 20 && bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
-      && bytes[4] === 2 && bytes[5] === 1 && bytes.readUInt16LE(18) === 62
+      && bytes[4] === 2 && bytes[5] === 1 && bytes.readUInt16LE(18) === info.elfMachine
     : info.format === "macho"
       ? bytes.length >= 8 && bytes.readUInt32LE(0) === 0xfeedfacf && bytes.readUInt32LE(4) === 0x0100000c
       : isWindowsX64(bytes);
