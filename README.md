@@ -120,3 +120,9 @@ its bundled compiler, run
 For development builds sharing a version number, restage the compiler after
 rebuilding Onda. The compiler smoke test prints its executable checksum and checks
 the current language features; matching version text alone does not identify a build.
+
+Unpublished integration builds can pass `onda_run_id` and the exact
+`onda_source_ref` to the reusable packaging workflow. It downloads the completed
+SDK artifacts, verifies their source and checksums, and builds the GPU UI from
+that same Onda commit. Omitting the run ID keeps the combined integration build's
+shared GPU UI and SDK artifacts.

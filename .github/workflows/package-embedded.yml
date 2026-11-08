@@ -12,9 +12,14 @@ on:
         description: Onda commit supplying compiler and GPU UI artifacts in the calling run
         required: true
         type: string
+      onda_run_id:
+        description: Existing Onda SDK build run; empty uses the calling run
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   gpu-ui:
@@ -23,6 +28,19 @@ jobs:
       onda-version: ${{ steps.version.outputs.version }}
       matrix: ${{ steps.version.outputs.matrix }}
     steps:
+      - name: Validate Onda SDK inputs
+        env:
+          ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
+          ONDA_RUN_ID: ${{ inputs.onda_run_id }}
+        run: |
+          if [[ -n "$ONDA_SOURCE_REF" && ! "$ONDA_SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Expected a full Onda source commit' >&2
+            exit 1
+          fi
+          if [[ -n "$ONDA_RUN_ID" && ( ! "$ONDA_RUN_ID" =~ ^[1-9][0-9]*$ || -z "$ONDA_SOURCE_REF" ) ]]; then
+            echo 'An existing SDK run requires its exact Onda source commit' >&2
+            exit 1
+          fi
       - uses: actions/checkout@v5
         with:
           repository: onda-lang/onda-vscode
@@ -38,49 +56,51 @@ jobs:
           echo "version=$(node ./scripts/onda-version.mjs)" >> "$GITHUB_OUTPUT"
           echo "matrix=$(node ./scripts/compiler-bundle.mjs)" >> "$GITHUB_OUTPUT"
       - name: Download unpublished shared GPU UI
-        if: inputs.onda_source_ref != ''
+        if: inputs.onda_source_ref != '' && inputs.onda_run_id == ''
         uses: actions/download-artifact@v7
         with:
           name: onda-gpu-ui
           path: ${{ runner.temp }}/gpu-ui
       - name: Verify and stage unpublished GPU UI
-        if: inputs.onda_source_ref != ''
+        if: inputs.onda_source_ref != '' && inputs.onda_run_id == ''
         env:
           ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
         run: |
           test "$(cat "$RUNNER_TEMP/gpu-ui/onda-source.txt")" = "$ONDA_SOURCE_REF"
           node ./scripts/stage-gpu-ui.mjs "$RUNNER_TEMP/gpu-ui"
       - name: Check out matching Onda UI source
-        if: inputs.onda_source_ref == ''
+        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         uses: actions/checkout@v5
         with:
           repository: onda-lang/onda
-          ref: refs/tags/${{ steps.version.outputs.version }}
+          ref: ${{ inputs.onda_source_ref || format('refs/tags/{0}', steps.version.outputs.version) }}
           path: .onda-source
-      - name: Verify Onda source tag
-        if: inputs.onda_source_ref == ''
+      - name: Verify Onda UI source
+        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         env:
           ONDA_VERSION: ${{ steps.version.outputs.version }}
+          ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
         run: |
+          expected="${ONDA_SOURCE_REF:-refs/tags/$ONDA_VERSION}"
           test "$(git -C .onda-source rev-parse HEAD)" = \
-            "$(git -C .onda-source rev-parse "refs/tags/$ONDA_VERSION^{commit}")"
+            "$(git -C .onda-source rev-parse "$expected^{commit}")"
           if [[ ! -f .onda-source/scripts/build-gpu-ui.mjs ]]; then
             echo "Onda $ONDA_VERSION has no GPU UI build. Update onda-version to the GPU release." >&2
             exit 1
           fi
       - uses: dtolnay/rust-toolchain@1.98.0
-        if: inputs.onda_source_ref == ''
+        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         with:
           targets: wasm32-unknown-unknown
       - name: Build shared GPU UI
-        if: inputs.onda_source_ref == ''
+        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         working-directory: .onda-source
         run: |
           npm ci
           cargo install wasm-pack --version 0.15.0 --locked
           npm run build:gpu-ui
       - name: Stage matching GPU UI
-        if: inputs.onda_source_ref == ''
+        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         run: node ./scripts/stage-gpu-ui.mjs .onda-source/ui/gpu
       - run: npm test
       - uses: actions/upload-artifact@v6
@@ -132,6 +152,9 @@ jobs:
         with:
           name: onda-${{ matrix.release }}
           path: ${{ runner.temp }}/onda-sdk
+          repository: onda-lang/onda
+          run-id: ${{ inputs.onda_run_id || github.run_id }}
+          github-token: ${{ inputs.onda_run_id && github.token || '' }}
       - name: Select and verify Onda compiler archive
         id: compiler
         shell: bash
