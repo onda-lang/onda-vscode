@@ -90,6 +90,10 @@ the compiler to verify its version and requires a matching host architecture.
 Both staged bundles must match `onda-version`. Extension builds copy the generated
 UI into `out/gpu`.
 
+After staging, `npm run watch` builds the extension and keeps TypeScript and GPU
+assets updated, including when `stage:gpu` replaces the staged bundle. Reload the
+extension development window to use a newly staged UI.
+
 For a real extension-host/playback check, with VS Code available as `code` or
 selected by `VSCODE_BIN`:
 
@@ -99,7 +103,9 @@ npm run test:gpu-host -- bundled
 
 Pass a VSIX path as the second argument to test its installed contents. The test
 uses a temporary profile and checks playback, parameter edits, panel visibility,
-and source reload. `npm run test:compiler` separately checks the bundled CLI/LSP
+and source reload. Host failures save their error and language diagnostics in
+`host-failure.json` in the reported artifact directory.
+`npm run test:compiler` separately checks the bundled CLI/LSP
 without relying on an Onda installation on `PATH`.
 
 `npm run test:integration` exercises the extension with real LSP, daemon, and playback

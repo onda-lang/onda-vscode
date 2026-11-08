@@ -237,7 +237,7 @@
     "compile": "npm run clean && tsc -p ./ && npm run copy-run-ui",
     "test": "npm run compile && node --test ./test/*.test.js",
     "vscode:prepublish": "node ./scripts/verify-compiler.mjs --packaging && npm run compile",
-    "watch": "tsc -watch -p ./",
+    "watch": "node ./scripts/watch.mjs",
     "stage:gpu": "node ./scripts/stage-gpu-ui.mjs",
     "test:gpu-host": "node ./scripts/test-gpu-host.mjs",
     "package:gpu": "node ./scripts/package-gpu.mjs",

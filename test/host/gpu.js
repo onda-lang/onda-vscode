@@ -45,7 +45,7 @@ async function checkExternalDependencies(root) {
 
 // Runs inside VS Code's real extension host. The outer CDP driver exercises
 // the canvas; this side controls editor visibility and the playback lifecycle.
-exports.run = async () => {
+async function run() {
   const root = process.env.ONDA_GPU_HOST_TEST_DIR;
   assert.ok(root, 'Run through npm run test:gpu-host');
   await checkExternalDependencies(root);
@@ -91,4 +91,21 @@ exports.run = async () => {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   throw new Error('GPU host driver did not finish');
+}
+
+exports.run = async () => {
+  try {
+    await run();
+  } catch (error) {
+    const root = process.env.ONDA_GPU_HOST_TEST_DIR;
+    if (root) await fs.writeFile(path.join(root, 'host-failure.json'), JSON.stringify({
+      message: String(error),
+      stack: error.stack,
+      diagnostics: vscode.languages.getDiagnostics().map(([uri, diagnostics]) => ({
+        path: uri.fsPath,
+        diagnostics: diagnostics.map(({ message, range, severity }) => ({ message, range, severity })),
+      })),
+    }, null, 2));
+    throw error;
+  }
 };

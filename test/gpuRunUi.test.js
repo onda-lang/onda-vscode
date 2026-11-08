@@ -121,6 +121,42 @@ test("GPU events from a replaced engine cannot edit or trigger the current event
   await current;
 });
 
+test("GPU MIDI notes stay with their originating playback engine", async t => {
+  const panel = createLifecyclePanel();
+  t.after(() => panel.evaluate("stopFile({silent:true})"));
+  await panel.start();
+  panel.connect();
+  const previousGeneration = panel.evaluate("String(runEngineGeneration)");
+  await panel.evaluate('runFile("/tmp/lifecycle.onda", {restart:true})');
+  const socket = panel.connect();
+  panel.evaluate("runPanelState.midi={available:true,noteOn:true,noteOff:true}");
+  const generation = panel.evaluate("String(runEngineGeneration)");
+  assert.notEqual(generation, previousGeneration);
+  const send = (engineGeneration, pressed) => panel.receive({
+    type: "midiNote", key: 64, velocity: pressed ? 0.5 : 0,
+    pressed, engineGeneration,
+  });
+
+  for (const invalid of [previousGeneration, undefined, null, 0, "unknown"]) {
+    await send(invalid, true);
+    await send(invalid, false);
+    assert.equal(socket.requests.length, 0);
+  }
+  await send(generation, true);
+  assert.deepEqual(socket.requests, [{
+    command: "triggerEvent", name: "note_on", values: [-1, 0, 64, 0.5],
+  }]);
+  await send(previousGeneration, false);
+  panel.evaluate("runSchemaReady=false");
+  await send(generation, false);
+  assert.equal(socket.requests.length, 1);
+  panel.evaluate("runSchemaReady=true");
+  await send(generation, false);
+  assert.deepEqual(socket.requests[1], {
+    command: "triggerEvent", name: "note_off", values: [-1, 0, 64, 0],
+  });
+});
+
 test("reusing an engine after an unchanged Run or canceled save keeps its events valid", async () => {
   const panel = createLifecyclePanel();
   await panel.start();

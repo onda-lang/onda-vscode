@@ -293,6 +293,9 @@ try {
   assert.equal(code, 0, log);
   console.log(`GPU extension host checks passed. Evidence: ${root}/result.json`);
 } catch (error) {
+  let hostFailure;
+  try { hostFailure = JSON.parse(await readFile(join(root, 'host-failure.json'), 'utf8')); }
+  catch { /* The failure may be in the outer driver rather than the extension host. */ }
   if (page) {
     try { await writeFile(join(root, 'failure.json'), JSON.stringify(await page.canvas(`({
       probe:window.probe,body:document.body.innerText,status:document.querySelector('#status')?.outerHTML,
@@ -305,5 +308,8 @@ try {
   await host('done', String(error)).catch(() => {});
   page?.socket.close();
   console.error(`Host test artifacts: ${root}\n${log}`);
+  if (hostFailure) {
+    throw new Error(`Extension host check failed: ${hostFailure.message}\nDiagnostics: ${root}/host-failure.json`, { cause: error });
+  }
   throw error;
 }

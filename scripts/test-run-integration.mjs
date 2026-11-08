@@ -147,6 +147,57 @@ try {
     assert.equal(code, 0);
   });
 
+  await test('MIDI commands cannot cross a real playback engine replacement', {timeout:30000}, async t => {
+    const file = join(workspace, 'midi-generation.onda');
+    await writeFile(file, `init:
+  presses = 0
+  releases = 0
+  level = 0.0
+delegate snapshot(presses: i32, releases: i32, level: f32)
+event note_on(id: i32, channel: i32, key: i32, velocity: f32):
+  presses += 1
+  level = velocity
+event note_off(id: i32, channel: i32, key: i32, velocity: f32):
+  releases += 1
+  level = 0.0
+event cc(channel: i32, index: i32, value: f32) {}
+event inspect():
+  snapshot(presses, releases, level)
+sample:
+  out1 = 0.0
+`);
+    const panel = createRunPanel('0.9.0', panelOptions());
+    t.after(() => dispose(panel));
+    panel.context.source = file;
+    await panel.evaluate('runFile(source)');
+    const ready = () => panel.evaluate('runPanelState.connected && runSchemaReady');
+    await until(ready, 'initial MIDI playback');
+    const previousGeneration = panel.evaluate('String(runEngineGeneration)');
+    await panel.evaluate('runFile(source,{restart:true})');
+    await until(ready, 'replacement MIDI playback');
+    await until(() => panel.evaluate('pendingRunRequests.size===0'), 'MIDI playback initialization');
+    assert.equal(panel.evaluate('runPanelState.midi.noteOn && runPanelState.midi.noteOff'), true);
+    const generation = panel.evaluate('String(runEngineGeneration)');
+    assert.notEqual(generation, previousGeneration);
+    const send = (engineGeneration, pressed) => panel.receive({
+      type:'midiNote', key:60, velocity:pressed ? 0.5 : 0, pressed, engineGeneration,
+    });
+    const snapshot = async () => {
+      // MIDI executes at sample offsets; acknowledge a later MIDI event first.
+      await panel.evaluate("sendRunControlRequest('triggerEvent',{name:'cc',values:[0,0,0]})");
+      await panel.receive({type:'clearLog'});
+      await panel.receive({type:'triggerEvent',name:'inspect',values:[],engineGeneration:generation});
+      await until(() => panel.evaluate('runPanelState.logEntries.some(entry=>entry?.delegate?.name==="snapshot")'), 'MIDI state');
+      return JSON.parse(JSON.stringify(panel.evaluate('runPanelState.logEntries.find(entry=>entry?.delegate?.name==="snapshot").delegate.values')));
+    };
+    await send(previousGeneration, true);
+    await send(generation, true);
+    await send(previousGeneration, false);
+    assert.deepEqual(await snapshot(), {presses:1,releases:0,level:0.5});
+    await send(generation, false);
+    assert.deepEqual(await snapshot(), {presses:1,releases:1,level:0});
+  });
+
   for (const clear of [false, true]) {
     await test(`reload preserves a pending buffer ${clear ? 'clear' : 'selection'} before initialization`, {timeout:30000}, async t => {
       const file = join(workspace, 'pending-buffer.onda');
@@ -481,6 +532,45 @@ sample:
         && panel.evaluate('runPanelState.connected && runSchemaReady'), 'changed zero default');
       assert.equal((await snapshot()).zero64, zero === '-0.0' ? '-Infinity' : 'Infinity');
     }
+  });
+
+  await test('a failed Run save preserves an in-flight real metadata response', {timeout:15000}, async t => {
+    let child;
+    let metadataSent;
+    const sent = new Promise(resolve => { metadataSent = resolve; });
+    const proxy = {...childProcess, spawn(...args) {
+      const spawned = childProcess.spawn(...args);
+      if (args[0] !== command || !args[1].includes('daemon')) return spawned;
+      child = spawned;
+      const write = child.stdin.write.bind(child.stdin);
+      child.stdin.write = (line, ...rest) => {
+        if (line.includes('"command":"run_metadata"')) {
+          // Gate the real reply to exercise a slow compile deterministically.
+          child.stdout.pause();
+          metadataSent();
+        }
+        return write(line, ...rest);
+      };
+      return child;
+    }};
+    const panel = createRunPanel('0.9.0', panelOptions({child_process:proxy}));
+    t.after(() => dispose(panel));
+    panel.context.source = source;
+    panel.context.other = join(workspace, 'unsaved.onda');
+    panel.evaluate(`runPanelState.path=source;
+      vscode.window.showErrorMessage=async()=>undefined;
+      vscode.workspace.textDocuments=[{uri:vscode.Uri.file(other),isDirty:true,save:async()=>false}];`);
+    const refreshing = panel.evaluate('refreshStoppedRunMetadata(source)');
+    await sent;
+    await panel.evaluate('runFile(other)');
+    assert.equal(child.killed, false, 'A failed save must leave the metadata compiler alive');
+    child.stdout.resume();
+    await refreshing;
+    assert.equal(panel.evaluate('runSchemaReady'), true);
+    assert.equal(panel.evaluate('runPanelState.path'), source);
+    assert.equal(panel.evaluate('runPanelState.error'), undefined);
+    assert.equal(panel.evaluate("runPanelState.params.find(p=>p.name==='wide').default"), '9007199254740993');
+    assert.equal(panel.evaluate('cancelRunMetadata'), undefined);
   });
 
   await test('Stop terminates a real metadata compiler before its response', {timeout:15000}, async t => {

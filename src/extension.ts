@@ -345,11 +345,11 @@ async function runFile(
   options?: { restart?: boolean; fastMath?: boolean; preserveFocus?: boolean; saveInput?: boolean },
 ): Promise<void> {
   const requestId = ++runRequestId;
-  cancelRunMetadata?.();
   const input = await resolveRunPath(preferredInput, options?.saveInput ?? true);
   if (!input || requestId !== runRequestId) {
     return;
   }
+  cancelRunMetadata?.();
   const { fsPath, saved } = input;
   const preserveRunState = runPanelState.path === fsPath;
   if (!preserveRunState) {
@@ -1171,14 +1171,20 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
   updateRunFileWatcher();
   runFileWatcher?.acknowledge();
+  cancelRunMetadata?.();
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  cancelRunMetadata = cancel;
+  // A Run still resolving its input does not replace this metadata session.
+  const current = () => cancelRunMetadata === cancel && !controller.signal.aborted;
   runSchemaReady = false;
   try {
-    const result = await loadStoppedRunMetadata(fsPath, (graph) => {
-      if (requestId === runRequestId) {
+    const result = await loadStoppedRunMetadata(fsPath, controller.signal, (graph) => {
+      if (current()) {
         updateRunDependencies(fsPath, graph);
       }
     });
-    if (requestId !== runRequestId) return;
+    if (!current()) return;
     if (result.sources) updateRunDependencies(fsPath, result.sources);
     runSchemaReady = true;
     ++runEngineGeneration;
@@ -1203,7 +1209,7 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
     };
     postRunPanelState();
   } catch (error) {
-    if (requestId !== runRequestId) return;
+    if (!current()) return;
     runSchemaReady = true;
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
@@ -1213,6 +1219,8 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
       error: message,
     };
     postRunPanelState();
+  } finally {
+    if (cancelRunMetadata === cancel) cancelRunMetadata = undefined;
   }
 }
 
@@ -1239,27 +1247,20 @@ function mergeStoppedRunBuffers(
 
 async function loadStoppedRunMetadata(
   fsPath: string,
+  signal: AbortSignal,
   onSources?: (graph: unknown) => void,
 ): Promise<RunStoppedMetadata> {
-  cancelRunMetadata?.();
-  const controller = new AbortController();
-  const cancel = () => controller.abort();
-  cancelRunMetadata = cancel;
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
-  try {
-    return await withOndaDaemon(fsPath, controller.signal, async (request) => {
-      onSources?.(await request("run_sources", { path: fsPath }));
-      await request("initialize", {
-        sample_rate_hz: sampleRateHz,
-        block_samples: blockFrames,
-        fast_math: runPanelState.fastMath,
-        param_smoothing_seconds: runPanelState.paramSmoothingMs / 1000,
-      });
-      return await request("run_metadata", { path: fsPath }) ?? {};
-    }, onSources);
-  } finally {
-    if (cancelRunMetadata === cancel) cancelRunMetadata = undefined;
-  }
+  return await withOndaDaemon(fsPath, signal, async (request) => {
+    onSources?.(await request("run_sources", { path: fsPath }));
+    await request("initialize", {
+      sample_rate_hz: sampleRateHz,
+      block_samples: blockFrames,
+      fast_math: runPanelState.fastMath,
+      param_smoothing_seconds: runPanelState.paramSmoothingMs / 1000,
+    });
+    return await request("run_metadata", { path: fsPath }) ?? {};
+  }, onSources);
 }
 
 type DaemonRequest = (command: string, payload?: Record<string, unknown>) => Promise<any>;
@@ -2436,7 +2437,9 @@ function ensureRunPanel(preserveFocus = false): void {
         await updateRunDeviceSelection("midi", payload.name);
         break;
       case "midiNote":
-        triggerRunMidiNote(payload.key, payload.velocity, payload.pressed);
+        if (runSchemaReady && payload.engineGeneration === String(runEngineGeneration)) {
+          triggerRunMidiNote(payload.key, payload.velocity, payload.pressed);
+        }
         break;
       case "chooseBufferFile":
         if (typeof payload.name === "string") {

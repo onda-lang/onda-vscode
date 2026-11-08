@@ -63,7 +63,7 @@ for (const source of [undefined, "bundled", "external"]) {
       vscode.window.withProgress = async (_options, task) => task();`);
     await panel.evaluate("startClient()");
     await panel.evaluate('runFile("/tmp/bundled-fixture.onda")');
-    await panel.evaluate('loadStoppedRunMetadata("/tmp/bundled-fixture.onda")');
+    await panel.evaluate('loadStoppedRunMetadata("/tmp/bundled-fixture.onda", new AbortController().signal)');
     assert.equal(await panel.evaluate('executeProjectCommand(["project", "/tmp/project"], "/tmp", "Create")'), true);
     const expected = source === "external" ? "/custom/onda"
       : resolveOndaExecutable(path.join(__dirname, ".."), "bundled");

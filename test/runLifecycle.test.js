@@ -2,6 +2,44 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createLifecyclePanel } = require("./helpers/runLifecycle");
 
+for (const finishMetadataFirst of [false, true]) {
+  for (const error of [undefined, "Current source has a compile error"]) {
+    test(`a failed Run save preserves stopped metadata: metadata first ${finishMetadataFirst}, error ${!!error}`, async () => {
+      const panel = createLifecyclePanel();
+      panel.evaluate(`runPanelState.path = '/tmp/lifecycle.onda';
+        vscode.window.showErrorMessage = async () => undefined;
+        let finishSave;
+        vscode.workspace.textDocuments.push({
+          uri: vscode.Uri.file('/tmp/canceled.onda'), isDirty: true,
+          save: () => new Promise(resolve => { finishSave = () => resolve(false); }),
+        });`);
+      panel.setDaemonError(error);
+      panel.holdMetadata();
+      const refreshing = panel.evaluate("refreshStoppedRunMetadata('/tmp/lifecycle.onda')");
+      await new Promise(resolve => setImmediate(resolve));
+      const child = panel.launches[0].child;
+      const starting = panel.evaluate("runFile('/tmp/canceled.onda')");
+      assert.equal(child.killed, undefined);
+      if (finishMetadataFirst) {
+        panel.releaseMetadata();
+        await refreshing;
+      }
+      panel.evaluate("finishSave()");
+      await starting;
+      if (!finishMetadataFirst) panel.releaseMetadata();
+      await refreshing;
+      assert.equal(panel.evaluate("runSchemaReady"), true);
+      assert.equal(panel.state().path, "/tmp/lifecycle.onda");
+      assert.equal(panel.state().error, error ?? null);
+      if (!error) assert.equal(panel.state().params[0].name, "updated");
+      assert.equal(panel.launches.length, 1);
+      assert.equal(panel.evaluate("cancelRunMetadata"), undefined);
+      // Completion terminates the daemon; a failed save must not end it early.
+      assert.equal(child.killed, true);
+    });
+  }
+}
+
 for (const action of ["stopFile({silent:true})", "runPanel.dispose()", "runFile('/tmp/new.onda')", "deactivate()", "refreshStoppedRunMetadata('/tmp/new.onda')"]) {
   test(`obsolete metadata compilation is terminated by ${action}`, async () => {
     const panel = createLifecyclePanel();
