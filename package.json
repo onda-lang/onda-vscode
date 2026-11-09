@@ -235,8 +235,9 @@
     "clean": "node -e \"require('fs').rmSync('./out',{recursive:true,force:true})\"",
     "copy-run-ui": "node ./scripts/copy-run-ui.mjs",
     "compile": "npm run clean && tsc -p ./ && npm run copy-run-ui",
+    "bundle": "node ./scripts/bundle-extension.mjs",
     "test": "npm run compile && node --test ./test/*.test.js",
-    "vscode:prepublish": "node ./scripts/verify-compiler.mjs --packaging && npm run compile",
+    "vscode:prepublish": "node ./scripts/verify-compiler.mjs --packaging && npm run compile && npm run bundle",
     "watch": "node ./scripts/watch.mjs",
     "stage:gpu": "node ./scripts/stage-gpu-ui.mjs",
     "test:gpu-host": "node ./scripts/test-gpu-host.mjs",
@@ -251,6 +252,7 @@
     "@types/node": "^20.19.39",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
     "ovsx": "^1.3.0",
     "typescript": "^5.5.4"
   },

@@ -88,7 +88,9 @@ npm run package:embedded -- /path/to/extracted-onda-release linux-x64 onda.vsix
 Use `linux-arm64`, `win32-x64`, or `darwin-arm64` on those hosts; staging executes
 the compiler to verify its version and requires a matching host architecture.
 Both staged bundles must match `onda-version`. Extension builds copy the generated
-UI into `out/gpu`.
+UI into `out/gpu`. VSIX packaging bundles the extension and its JavaScript
+dependencies into one file, retaining dependency notices and the language client's
+process-cleanup script. Development builds retain individual modules and source maps.
 
 After staging, `npm run watch` builds the extension and keeps TypeScript and GPU
 assets updated, including when `stage:gpu` replaces the staged bundle. Reload the
@@ -113,9 +115,8 @@ processes, including dependency recovery, exact integer controls, event payloads
 pending buffer edits across reloads, cancellation, and subprocess cleanup.
 It uses the staged compiler by default and requires an
 audio output device. Select a local compiler with
-`npm run test:integration -- /path/to/onda`. To check packaged extension code and
-its bundled compiler, run
-`node scripts/test-run-integration.mjs bundled /path/to/extracted-vsix/extension`.
+`npm run test:integration -- /path/to/onda`. Check packaged extension code with
+`npm run test:gpu-host -- bundled /path/to/package.vsix`.
 
 For development builds sharing a version number, restage the compiler after
 rebuilding Onda. The compiler smoke test prints its executable checksum and checks

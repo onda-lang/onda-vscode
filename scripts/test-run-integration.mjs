@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { createRunPanel } from '../test/helpers/runPanel.js';
 import { compilerTargets, compilerVersion, extensionRoot, verifyCompilerBundle } from './compiler-bundle.mjs';
 
-const root = resolve(process.argv[3] || extensionRoot);
+const root = extensionRoot;
 const selectedCompiler = process.argv[2] || 'bundled';
 const bundled = selectedCompiler === 'bundled';
 const manifest = bundled ? verifyCompilerBundle(root, `${process.platform}-${process.arch}`) : undefined;
