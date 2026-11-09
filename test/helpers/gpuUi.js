@@ -10,7 +10,7 @@ async function gpuFixture(t) {
   const source = path.join(root, "onda/ui/gpu");
   const version = readOndaVersion();
   fs.mkdirSync(source, { recursive: true });
-  fs.writeFileSync(path.join(root, "onda/Cargo.toml"), `[workspace]\nmembers = []\n\n[workspace.package]\nedition = "2021"\nversion = "${version}"\nlicense = "MIT"\n\n[workspace.lints.clippy]\nunwrap_used = "deny"\n`);
+  fs.writeFileSync(path.join(root, "onda/Cargo.toml"), `[workspace]\nmembers = []\n\n[workspace.package]\nedition = "2021"\nversion = "${version}"\nlicense = "Apache-2.0"\n\n[workspace.lints.clippy]\nunwrap_used = "deny"\n`);
   const files = {};
   for (const name of [
     "index.html", "host.js", "browser.js", "protocol.js", "text-input.js", "pkg/onda_ui.js",

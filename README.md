@@ -127,3 +127,9 @@ Unpublished integration builds can pass `onda_run_id` and the exact
 SDK artifacts, verifies their source and checksums, and builds the GPU UI from
 that same Onda commit. Omitting the run ID keeps the combined integration build's
 shared GPU UI and SDK artifacts.
+
+## License
+
+Starting with the Onda 0.9.0 release, Onda-authored code in this repository is licensed
+under the [Apache License, Version 2.0](LICENSE). Third-party components retain their
+respective licenses.

@@ -5,7 +5,7 @@
   "version": "0.1.39",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/onda-lang/onda-vscode.git"
