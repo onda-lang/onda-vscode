@@ -6,12 +6,12 @@ const { afterEach } = require("node:test");
 
 const panels = new Set();
 afterEach(() => {
-  for (const panel of panels) panel.evaluate("disposeRunFileWatcher()");
+  for (const panel of panels) panel.evaluate("disposeRunFileWatcher(); stopScopePolling(); languageDependencies?.dispose()");
   panels.clear();
 });
 
-function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}) {
-  const extensionPath = path.join(__dirname, "..", "..", "out", "extension.js");
+function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings = {}, modules = {}, extensionDirectory = path.join(__dirname, "..", "..") } = {}) {
+  const extensionPath = path.join(extensionDirectory, "out", "extension.js");
   const extensionRequire = createRequire(extensionPath);
   const messages = [];
   const panelReveals = [];
@@ -30,18 +30,27 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
     extensionRoot: path.dirname(path.dirname(extensionPath)),
     __dirname: path.dirname(extensionPath),
     process,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    AbortController,
     require(name) {
       if (name in modules) return modules[name];
       if (name === "vscode") return {
+        ConfigurationTarget: { Global: 1, Workspace: 2 },
         ViewColumn: { Beside: 2 },
         Uri: { file: (file) => ({ scheme: "file", fsPath: file, toString: () => file }) },
         workspace: { textDocuments: [], getWorkspaceFolder: () => undefined, createFileSystemWatcher: () => ({}), getConfiguration: () => ({
-          inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key] }),
+          inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key], workspaceValue: workspaceSettings[key] }),
           get: (key, fallback) => ({
-            "server.path": "/custom/onda",
-            "server.args": ["--custom-option"],
+            "compiler.source": "external",
+            "exec.path": "/custom/onda",
+            "exec.args": ["--custom-option"],
             ...settings,
+            ...workspaceSettings,
           })[key] ?? fallback,
+          update: async (key, value, target) => { (target === 2 ? workspaceSettings : settings)[key] = value; },
         }) },
         window: { setStatusBarMessage(text, timeout) {
           const message = { text, timeout, disposed: false };
@@ -50,7 +59,8 @@ function createRunPanel(version = "0.8.20", { settings = {}, modules = {} } = {}
         }, createWebviewPanel: (type, title, showOptions) => {
           panelCreations.push(showOptions);
           let dispose;
-          return { webview, onDidDispose(handler) { dispose = handler; }, dispose() { dispose?.(); },
+          let viewStateChanged;
+          return { webview, onDidChangeViewState(handler) { viewStateChanged = handler; }, setVisible(visible) { this.visible = visible; viewStateChanged?.(); }, onDidDispose(handler) { dispose = handler; }, dispose() { dispose?.(); },
             reveal(column, preserveFocus) { panelReveals.push({ column, preserveFocus }); } };
         } },
       };

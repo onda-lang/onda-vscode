@@ -9,7 +9,7 @@ test("explains how to configure a missing Onda executable", () => {
   assert.deepEqual(describeOndaExecutableError("onda", error), {
     message:
       "Onda executable 'onda' was not found. Install Onda and add it to PATH, "
-      + "or set 'onda.server.path' to the executable's full path.",
+      + "or set 'onda.exec.path' to the executable's full path.",
     canConfigure: true,
   });
 });

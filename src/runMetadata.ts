@@ -1,11 +1,22 @@
-export type RunScalarValue = boolean | number | null;
+export type RunScalarValue = boolean | number | string | null;
+
+/** JSON-safe scalar encoding shared by parameter and event transports. */
+export function wireRunFloat(value: number): number | string {
+  if (Object.is(value, -0)) return "-0";
+  return Number.isFinite(value) ? value : String(value);
+}
+
+export interface RunEnumMetadata {
+  name: string;
+  members: { name: string; label: string }[];
+}
 
 export interface NormalizedRunParamPayload {
   index: number;
   name: string;
   type: string;
   value: RunScalarValue;
-  default: number | null;
+  default: number | string | null;
   rangeMin: number | null;
   rangeMax: number | null;
   scale: string | null;
@@ -13,7 +24,19 @@ export interface NormalizedRunParamPayload {
   unit: string | null;
   step: number | null;
   stepCount: number | null;
+  enumeration: RunEnumMetadata | null;
   scalar: boolean;
+  array?: { name: string; length: number; index: number };
+}
+
+export function sameEnumChoices(
+  left: RunEnumMetadata | null,
+  right: RunEnumMetadata | null,
+): boolean {
+  return left === right || !!left && !!right
+    && left.name === right.name
+    && left.members.length === right.members.length
+    && left.members.every((member, index) => member.name === right.members[index].name);
 }
 
 export function normalizeRunParams(raw: unknown): NormalizedRunParamPayload[] | undefined {
@@ -32,6 +55,12 @@ export function initialRunParamValue(
     }
     return param.value;
   }
+  return defaultRunParamValue(param);
+}
+
+export function defaultRunParamValue(
+  param: Pick<NormalizedRunParamPayload, "type" | "default" | "rangeMin">,
+): RunScalarValue {
   if (param.type === "bool") {
     return param.default !== null && param.default !== undefined
       ? param.default !== 0
@@ -41,14 +70,15 @@ export function initialRunParamValue(
     return param.default;
   }
   if (param.rangeMin !== null && param.rangeMin !== undefined) {
-    return param.rangeMin;
+    return param.type === "i64" ? String(param.rangeMin) : param.rangeMin;
   }
-  return 0;
+  return param.type === "i64" ? "0" : 0;
 }
 
 function normalizeRunParam(raw: unknown): NormalizedRunParamPayload {
   const source = isRecord(raw) ? raw : {};
   const type = stringField(source, ["type", "type_repr"]) ?? "f32";
+  const array = arrayMetadata(source.array);
   return {
     index: numberField(source, ["index"]) ?? 0,
     name: stringField(source, ["name"]) ?? "",
@@ -70,16 +100,45 @@ function normalizeRunParam(raw: unknown): NormalizedRunParamPayload {
     unit: stringField(source, ["unit"]),
     step: numberField(source, ["step"], ["stepRepr", "step_repr"]),
     stepCount: numberField(source, ["stepCount", "step_count"]),
+    enumeration: enumMetadata(source.enumeration),
     scalar: source.scalar !== false,
+    ...(array ? { array } : {}),
   };
+}
+
+function arrayMetadata(raw: unknown): NormalizedRunParamPayload["array"] {
+  if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name
+    || typeof raw.length !== "number" || !Number.isSafeInteger(raw.length) || raw.length < 1
+    || typeof raw.index !== "number" || !Number.isSafeInteger(raw.index)
+    || raw.index < 0 || raw.index >= raw.length) return undefined;
+  return { name: raw.name, length: raw.length, index: raw.index };
+}
+
+function enumMetadata(raw: unknown): RunEnumMetadata | null {
+  if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name
+    || !Array.isArray(raw.members) || raw.members.length === 0) {
+    return null;
+  }
+  const members: RunEnumMetadata["members"] = [];
+  const names = new Set<string>();
+  for (const member of raw.members) {
+    if (!isRecord(member) || typeof member.name !== "string" || !member.name
+      || typeof member.label !== "string" || names.has(member.name)) {
+      return null;
+    }
+    names.add(member.name);
+    members.push({ name: member.name, label: member.label });
+  }
+  return { name: raw.name, members };
 }
 
 function defaultField(
   source: Record<string, unknown>,
   type: string,
-): number | null {
+): number | string | null {
   if (type !== "bool") {
-    return numberField(source, ["default"], ["defaultRepr", "default_repr"]);
+    const value = scalarField(source, type, ["default"], ["defaultRepr", "default_repr"]);
+    return typeof value === "boolean" ? null : value;
   }
   const value = scalarField(
     source,
@@ -100,10 +159,21 @@ function scalarField(
   reprKeys: string[],
 ): RunScalarValue {
   const direct = firstDefined(source, valueKeys);
-  if (typeof direct === "boolean" || typeof direct === "number") {
+  if (type === "i64") {
+    const value = direct ?? firstDefined(source, reprKeys);
+    const repr = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : value;
+    if (typeof repr !== "string" || !/^-?(?:0|[1-9][0-9]*)$/.test(repr)) return null;
+    const integer = BigInt(repr);
+    return integer >= -9223372036854775808n && integer <= 9223372036854775807n
+      ? integer.toString() : null;
+  }
+  if (typeof direct === "number") {
+    return wireRunFloat(direct);
+  }
+  if (typeof direct === "boolean") {
     return direct;
   }
-  const repr = firstDefined(source, reprKeys);
+  const repr = direct ?? firstDefined(source, reprKeys);
   if (typeof repr !== "string") {
     return null;
   }
@@ -115,6 +185,13 @@ function scalarField(
       return false;
     }
     return null;
+  }
+  if (type === "f32" || type === "f64") {
+    if (repr === "NaN") return "NaN";
+    if (repr === "inf" || repr === "Infinity") return "Infinity";
+    if (repr === "-inf" || repr === "-Infinity") return "-Infinity";
+    const value = Number(repr);
+    return Number.isFinite(value) ? wireRunFloat(value) : null;
   }
   const value = Number(repr);
   return Number.isFinite(value) ? value : null;

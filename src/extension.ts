@@ -2,6 +2,7 @@
 import * as fs from "fs";
 import * as net from "net";
 import * as path from "path";
+import { StringDecoder } from "string_decoder";
 import * as vscode from "vscode";
 import {
   LanguageClient,
@@ -9,7 +10,15 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { initialRunParamValue, normalizeRunParams } from "./runMetadata";
+import {
+  defaultRunParamValue,
+  initialRunParamValue,
+  NormalizedRunParamPayload,
+  normalizeRunParams,
+  sameEnumChoices,
+  RunScalarValue,
+  wireRunFloat,
+} from "./runMetadata";
 import {
   applyRunOutputNotification,
   clearRunLogState,
@@ -22,8 +31,10 @@ import {
   sameRunProcessConfiguration,
 } from "./runConfiguration";
 import { describeOndaExecutableError } from "./executableError";
-import { mergeRunDependencies, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
+import { OndaCompilerSource, resolveOndaExecutable } from "./ondaExecutable";
+import { mergeRunDependencies, normalizeRunPath, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
 import { RunFileWatcher } from "./runFileWatcher";
+import { LanguageDependencies } from "./languageDependencies";
 import {
   COMPUTER_KEYBOARD_MIDI_INPUT,
   NO_MIDI_CAPABILITIES,
@@ -32,7 +43,6 @@ import {
   runMidiNoteEvent,
 } from "./runMidi";
 
-type RunScalarValue = boolean | number | null;
 type RunEventValue =
   | boolean
   | number
@@ -41,21 +51,7 @@ type RunEventValue =
   | RunEventValue[]
   | { [key: string]: RunEventValue };
 
-interface RunParamPayload {
-  index: number;
-  name: string;
-  type: string;
-  value: RunScalarValue;
-  default: number | null;
-  rangeMin: number | null;
-  rangeMax: number | null;
-  scale: string | null;
-  curve: number | null;
-  unit: string | null;
-  step: number | null;
-  stepCount: number | null;
-  scalar: boolean;
-}
+type RunParamPayload = NormalizedRunParamPayload;
 
 interface RunParamState extends RunParamPayload {}
 
@@ -66,7 +62,7 @@ interface RunBufferPayload {
   channelsKind: "mono" | "static" | "dynamic";
   channelsStatic: number | null;
   loadedPath: string | null;
-  loadedFrames: number | null;
+  loadedSamples: number | null;
   loadedChannels: number | null;
   loadedSampleRate: number | null;
   waveform?: {
@@ -163,13 +159,22 @@ interface PendingControlRequest {
   reject: (error: Error) => void;
 }
 
+class RunControlCancelled extends Error {}
+
 let client: LanguageClient | undefined;
+let languageDependencies: LanguageDependencies | undefined;
+let clientRestart: Promise<void> = Promise.resolve();
+let extensionDeactivated = false;
 let extensionContext: vscode.ExtensionContext | undefined;
 let runProcess: childProcess.ChildProcessWithoutNullStreams | undefined;
 let runPath: string | undefined;
 let activeRunConfiguration: RunProcessConfiguration | undefined;
+let runAudioOverrides: { sampleRateHz?: number; blockFrames?: number } = {};
 let runProcessingRequested = false;
 let runRequestId = 0;
+let cancelRunMetadata: (() => void) | undefined;
+// Pending/canceled Run requests do not replace the active event schema.
+let runEngineGeneration = 0;
 let runTransportUpdateId = 0;
 const runInputSaves = new Map<string, number>();
 let runSourceFiles = new Set<string>();
@@ -184,13 +189,22 @@ let runControlSocket: net.Socket | undefined;
 let runControlBuffer = "";
 let runStdoutBuffer = "";
 let runControlRequestId = 0;
+let runParamResetId = 0;
 let stoppingRunPid: number | undefined;
 const pendingRunRequests = new Map<number, PendingControlRequest>();
 const runKillTimers = new Map<number, NodeJS.Timeout>();
 let scopePollingTimer: NodeJS.Timeout | undefined;
 let scopePollingInFlight = false;
+let scopePollingRequested = false;
+let scopePollingEpoch = 0;
+let scopeCaptureSocket: net.Socket | undefined;
+let scopeCaptureMode: "off" | "meter" | "waveform" = "off";
+let scopeColumns = 348;
+let scopeViewVisible = false;
+let scopeMeterVisible = false;
+let runSchemaReady = false;
 const SCOPE_MAX_FRAMES = 1024;
-const SCOPE_POLL_INTERVAL_MS = 50;
+const SCOPE_POLL_INTERVAL_MS = 1000 / 30;
 const RUN_FORCE_KILL_DELAY_MS = 1500;
 const DEFAULT_RUN_SAMPLE_RATE_HZ = 48_000;
 const DEFAULT_RUN_BLOCK_FRAMES = 512;
@@ -202,6 +216,8 @@ const RUN_SAMPLE_COUNTER_MAX = Number(
 let paramSmoothingUpdateId = 0;
 let confirmedParamSmoothing = { id: 0, milliseconds: DEFAULT_PARAM_SMOOTHING_MS };
 const preservedRunBufferBindings = new Map<string, string | null>();
+const runBufferBindingUpdates = new Map<string, number>();
+const pendingRunBufferBindings = new Map<string, { filePath: string | null }>();
 let runPanelState: RunPanelState = {
   ...initialRunLogState(),
   running: false,
@@ -227,10 +243,20 @@ let runPanelState: RunPanelState = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
+  extensionDeactivated = false;
   runOutput = vscode.window.createOutputChannel("Onda Run");
   projectOutput = vscode.window.createOutputChannel("Onda Projects");
   serverOutput = vscode.window.createOutputChannel("Onda Language Server");
   context.subscriptions.push(runOutput, projectOutput, serverOutput);
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (event) => {
+    if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
+    if (event.affectsConfiguration("onda.run.sampleRate")) delete runAudioOverrides.sampleRateHz;
+    if (event.affectsConfiguration("onda.run.blockSize")) delete runAudioOverrides.blockFrames;
+    if (["onda.compiler.source", "onda.exec.path", "onda.exec.args"]
+      .some((setting) => event.affectsConfiguration(setting))) {
+      await restartClient();
+    }
+  }));
 
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.restartLanguageServer", async () => {
@@ -268,10 +294,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  await startClient(context);
+  await restartClient();
 }
 
 export async function deactivate(): Promise<void> {
+  extensionDeactivated = true;
+  ++runRequestId;
+  cancelRunMetadata?.();
+  await clientRestart;
+  await stopClient();
+}
+
+async function stopClient(): Promise<void> {
+  languageDependencies?.dispose();
+  languageDependencies = undefined;
   disposeRunFileWatcher();
   await stopFile({ silent: true });
 
@@ -290,12 +326,18 @@ export async function deactivate(): Promise<void> {
   }
 }
 
-async function restartClient(): Promise<void> {
-  await deactivate();
-  if (!extensionContext) {
-    throw new Error("Onda extension context is not initialized");
-  }
-  await startClient(extensionContext);
+function restartClient(): Promise<void> {
+  const restart = clientRestart.then(async () => {
+    if (extensionDeactivated) return;
+    await stopClient();
+    if (extensionDeactivated) return;
+    if (!extensionContext) {
+      throw new Error("Onda extension context is not initialized");
+    }
+    await startClient();
+  });
+  clientRestart = restart.catch(() => {});
+  return restart;
 }
 
 async function runFile(
@@ -307,20 +349,20 @@ async function runFile(
   if (!input || requestId !== runRequestId) {
     return;
   }
+  cancelRunMetadata?.();
   const { fsPath, saved } = input;
   const preserveRunState = runPanelState.path === fsPath;
   if (!preserveRunState) {
     disposeRunFileWatcher();
     preservedRunBufferBindings.clear();
+    runBufferBindingUpdates.clear();
+    pendingRunBufferBindings.clear();
     runSourceFiles = new Set([path.resolve(fsPath)]);
   }
-  const runHost = ondaRunHostSetting();
-  const runTheme = ondaRunThemeSetting();
   const { sampleRateHz, blockFrames, args: audioArgs } = ondaRunAudioSettings();
   const fastMath = options?.fastMath ?? false;
   const preserveFocus = options?.preserveFocus ?? false;
   const desiredRunConfiguration: RunProcessConfiguration = {
-    host: runHost,
     sampleRateHz,
     blockFrames,
     fastMath,
@@ -329,28 +371,16 @@ async function runFile(
     midiInputDevice: runPanelState.currentMidiInputDevice,
   };
 
-  if (runHost === "webview") {
-    ensureRunPanel(preserveFocus);
-  } else {
-    disposeRunFileWatcher();
-    if (runPanel) {
-      const panel = runPanel;
-      runPanel = undefined;
-      runPanelReady = false;
-      panel.dispose();
-    }
-  }
+  ensureRunPanel(preserveFocus);
   if (
     runProcess &&
     runPath === fsPath &&
     !options?.restart && !saved &&
     sameRunProcessConfiguration(activeRunConfiguration, desiredRunConfiguration)
   ) {
-    if (runHost === "webview") {
-      revealRunPanel(preserveFocus);
-      if (runPanelState.connected && !runProcessingRequested) {
-        await playRunProcessing();
-      }
+    revealRunPanel(preserveFocus);
+    if (runPanelState.connected && !runProcessingRequested) {
+      await playRunProcessing();
     }
     return;
   }
@@ -363,6 +393,7 @@ async function runFile(
   const preservedEvents =
     preserveRunState ? runPanelState.events : [];
   runProcessingRequested = true;
+  runSchemaReady = false;
   runPanelState = {
     ...initialRunLogState(),
     running: false,
@@ -396,11 +427,8 @@ async function runFile(
     milliseconds: runPanelState.paramSmoothingMs,
   };
 
-  const { command, extraArgs } = ondaExecutableConfig();
-  const args =
-    runHost === "egui"
-      ? [...extraArgs, "run", fsPath, "--theme", runTheme]
-      : [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources"];
+  const { command, extraArgs, source } = ondaExecutableConfig();
+  const args = [...extraArgs, "run", "play", fsPath, "--forever", "--control-json", "--report-sources", "--start-paused"];
   args.push(
     ...audioArgs,
     "--param-smoothing-ms",
@@ -430,29 +458,26 @@ async function runFile(
     detached: process.platform !== "win32",
   });
 
+  ++runEngineGeneration;
   runProcess = child;
   runPath = fsPath;
   activeRunConfiguration = desiredRunConfiguration;
   runStdoutBuffer = "";
   let runStderrBuffer = "";
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
 
   runOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
-  if (runHost === "webview") {
-    revealRunPanel(preserveFocus);
-  }
+  revealRunPanel(preserveFocus);
 
   child.stdout.on("data", (chunk: Buffer) => {
     if (runProcess !== child) {
       return;
     }
-    if (runHost === "webview") {
-      handleRunStdout(chunk.toString());
-    } else {
-      runOutput?.append(chunk.toString());
-    }
+    handleRunStdout(stdoutDecoder.write(chunk));
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    const text = chunk.toString();
+    const text = stderrDecoder.write(chunk);
     runStderrBuffer += text;
     runOutput?.append(text);
   });
@@ -460,7 +485,7 @@ async function runFile(
     if (runProcess !== child) {
       return;
     }
-    const description = describeOndaExecutableError(command, error);
+    const description = describeOndaExecutableError(command, error, source);
     const failedPath = fsPath;
     clearRunRuntimeState({ preservePath: failedPath, preserveProcessingRequested: true });
     runPanelState = {
@@ -476,11 +501,12 @@ async function runFile(
       `Failed to start Onda run${failedPath ? ` (${path.basename(failedPath)})` : ""}`,
       command,
       error,
+      source,
     );
   });
   child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
     const finishedPath = fsPath;
-    clearRunKillTimer(child.pid);
+    clearRunKillTimerIfGroupExited(child.pid);
     const expectedStop = child.pid !== undefined && stoppingRunPid === child.pid;
     if (expectedStop) {
       stoppingRunPid = undefined;
@@ -532,6 +558,8 @@ async function setRunProcessing(playing: boolean): Promise<void> {
   const requestId = runRequestId;
   const updateId = ++runTransportUpdateId;
   runProcessingRequested = playing;
+  // Startup will honor the latest intent after controls and bindings are restored.
+  if (playing && !runSchemaReady) return;
   try {
     await sendRunControlRequest(playing ? "play" : "pause");
     // Reusing this process for another Run leaves its pending transport valid.
@@ -576,9 +604,11 @@ async function stopFile(options?: {
   runFailureMessage?.dispose();
   runFailureMessage = undefined;
   if (!options?.preservePendingStart) ++runRequestId;
+  cancelRunMetadata?.();
   ++runTransportUpdateId;
   if (!runProcess) {
     runProcessingRequested = false;
+    runSchemaReady = true;
     if (!options?.silent) {
       void vscode.window.showInformationMessage("No Onda run is currently running.");
     }
@@ -616,6 +646,7 @@ function clearRunRuntimeState(options?: {
   preservePath?: string;
   preserveProcessingRequested?: boolean;
 }): void {
+  runSchemaReady = true;
   runProcess = undefined;
   runPath = options?.preservePath;
   activeRunConfiguration = undefined;
@@ -657,12 +688,13 @@ function terminateRunProcessTree(child: childProcess.ChildProcessWithoutNullStre
 }
 
 function terminateUnixRunProcess(pid: number): void {
-  const groupPid = -pid;
+  let targetPid = -pid;
   try {
-    process.kill(groupPid, "SIGTERM");
+    process.kill(targetPid, "SIGTERM");
   } catch {
+    targetPid = pid;
     try {
-      process.kill(pid, "SIGTERM");
+      process.kill(targetPid, "SIGTERM");
     } catch {
       return;
     }
@@ -672,17 +704,23 @@ function terminateUnixRunProcess(pid: number): void {
   const timer = setTimeout(() => {
     runKillTimers.delete(pid);
     try {
-      process.kill(groupPid, "SIGKILL");
+      process.kill(targetPid, "SIGKILL");
     } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Ignore termination errors for already-exited children.
-      }
+      // Ignore termination errors for already-exited processes.
     }
   }, RUN_FORCE_KILL_DELAY_MS);
   timer.unref();
   runKillTimers.set(pid, timer);
+}
+
+function clearRunKillTimerIfGroupExited(pid: number | undefined): void {
+  if (pid === undefined || !runKillTimers.has(pid)) return;
+  // A launcher can exit and close its pipes while descendants still need killing.
+  try {
+    process.kill(-pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") clearRunKillTimer(pid);
+  }
 }
 
 function clearRunKillTimer(pid: number | undefined): void {
@@ -705,8 +743,8 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
   if (!activePath) {
     return;
   }
-  if (path.resolve(document.uri.fsPath) !== path.resolve(activePath)
-    && !runSourceFiles.has(path.resolve(document.uri.fsPath))) {
+  if (normalizeRunPath(document.uri.fsPath) !== normalizeRunPath(activePath)
+    && !runSourceFiles.has(normalizeRunPath(document.uri.fsPath))) {
     return;
   }
   if (runFileWatcher?.isCurrent(document.uri.fsPath)) return;
@@ -716,8 +754,6 @@ async function restartRunForSavedDocument(document: vscode.TextDocument): Promis
 async function restartRunForSourceChanges(): Promise<void> {
   const activePath = runPath ?? runPanelState.path;
   if (!activePath) return;
-  // The native host watches its own sources and owns its Play/Stop state.
-  if (runProcess && activeRunConfiguration?.host === "egui") return;
   if (runProcessingRequested) {
     await runFile(activePath, {
       restart: true, fastMath: runPanelState.fastMath, preserveFocus: true, saveInput: false,
@@ -733,7 +769,9 @@ function updateRunFileWatcher(): void {
     void restartRunForSourceChanges().catch((error) => {
       runOutput?.appendLine(`Failed to reload Onda run: ${String(error)}`);
     });
-  }, () => runInputSaves.size > 0);
+  }, () => runInputSaves.size > 0, (file, error) => {
+    runOutput?.appendLine(`Could not validate Onda source ${file}: ${String(error)}; retrying.`);
+  });
   runFileWatcher.update(runSourceFiles);
 }
 
@@ -807,12 +845,17 @@ async function saveOpenDocument(
   return undefined;
 }
 
-function ondaExecutableConfig(): { command: string; extraArgs: string[] } {
+function ondaExecutableConfig(): { command: string; extraArgs: string[]; source: OndaCompilerSource } {
   const config = vscode.workspace.getConfiguration("onda");
-  const configuredPath = config.get<string>("server.path");
+  const source = config.get<OndaCompilerSource>("compiler.source", "bundled");
   return {
-    command: configuredPath && configuredPath.trim().length > 0 ? configuredPath : "onda",
-    extraArgs: config.get<string[]>("server.args", []),
+    command: resolveOndaExecutable(
+      extensionContext?.extensionPath ?? path.resolve(__dirname, ".."),
+      source,
+      config.get<string>("exec.path"),
+    ),
+    extraArgs: config.get<string[]>("exec.args", []),
+    source,
   };
 }
 
@@ -822,8 +865,9 @@ async function showOndaCommandError(
   context: string,
   command: string,
   error: unknown,
+  source: OndaCompilerSource,
 ): Promise<void> {
-  const description = describeOndaExecutableError(command, error);
+  const description = describeOndaExecutableError(command, error, source);
   const message = `${context}: ${description.message}`;
   if (!description.canConfigure) {
     await vscode.window.showErrorMessage(message);
@@ -834,7 +878,7 @@ async function showOndaCommandError(
   if (action === CONFIGURE_EXECUTABLE_ACTION) {
     await vscode.commands.executeCommand(
       "workbench.action.openSettings",
-      "onda.server.path",
+      source === "bundled" ? "onda.compiler.source" : "onda.exec.path",
     );
   }
 }
@@ -1003,8 +1047,8 @@ function validateProjectName(value: string): string | undefined {
   if (name.length === 0) {
     return "Enter a project name.";
   }
-  if (Buffer.byteLength(name, "utf8") > 255) {
-    return "The project name must be at most 255 UTF-8 bytes.";
+  if (Buffer.byteLength(projectManifestName(name), "utf8") > 255) {
+    return "The project name, including .ondaproject, must be at most 255 UTF-8 bytes.";
   }
   if (
     /[<>:"|?*\\/\u0000-\u001f]/.test(name)
@@ -1017,7 +1061,7 @@ function validateProjectName(value: string): string | undefined {
     return "The project name cannot end with a dot or space.";
   }
   const stem = name.split(".", 1)[0].toUpperCase();
-  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) {
+  if (/^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$/.test(stem)) {
     return "That project name is reserved on Windows.";
   }
   return undefined;
@@ -1032,7 +1076,7 @@ async function executeProjectCommand(
   cwd: string,
   title: string,
 ): Promise<boolean> {
-  const { command, extraArgs } = ondaExecutableConfig();
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const args = [...extraArgs, ...commandArgs];
   projectOutput?.appendLine(`$ ${command} ${args.map(shellQuote).join(" ")}`);
   try {
@@ -1043,7 +1087,7 @@ async function executeProjectCommand(
     return true;
   } catch (error) {
     projectOutput?.show(true);
-    await showOndaCommandError("Onda project command failed", command, error);
+    await showOndaCommandError("Onda project command failed", command, error, source);
     return false;
   }
 }
@@ -1096,11 +1140,11 @@ async function offerToOpenProject(destination: vscode.Uri, verb: string): Promis
 }
 
 function projectManifestUri(destination: vscode.Uri): vscode.Uri {
-  const destinationName = path.basename(destination.fsPath);
-  const manifestName = isOndaProjectPath(destinationName)
-    ? destinationName
-    : `${destinationName}.ondaproject`;
-  return vscode.Uri.joinPath(destination, manifestName);
+  return vscode.Uri.joinPath(destination, projectManifestName(path.basename(destination.fsPath)));
+}
+
+function projectManifestName(name: string): string {
+  return isOndaProjectPath(name) ? name : `${name}.ondaproject`;
 }
 
 function trimRunErrorText(text: string, maxChars = 4000): string | undefined {
@@ -1127,14 +1171,23 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
   updateRunFileWatcher();
   runFileWatcher?.acknowledge();
+  cancelRunMetadata?.();
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  cancelRunMetadata = cancel;
+  // A Run still resolving its input does not replace this metadata session.
+  const current = () => cancelRunMetadata === cancel && !controller.signal.aborted;
+  runSchemaReady = false;
   try {
-    const result = await loadStoppedRunMetadata(fsPath, (graph) => {
-      if (requestId === runRequestId) {
+    const result = await loadStoppedRunMetadata(fsPath, controller.signal, (graph) => {
+      if (current()) {
         updateRunDependencies(fsPath, graph);
       }
     });
-    if (requestId !== runRequestId) return;
+    if (!current()) return;
     if (result.sources) updateRunDependencies(fsPath, result.sources);
+    runSchemaReady = true;
+    ++runEngineGeneration;
     const params = normalizeStoppedRunParams(result.params);
     runPanelState = {
       ...runPanelState,
@@ -1156,7 +1209,8 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
     };
     postRunPanelState();
   } catch (error) {
-    if (requestId !== runRequestId) return;
+    if (!current()) return;
+    runSchemaReady = true;
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
       ...runPanelState,
@@ -1165,6 +1219,8 @@ async function refreshStoppedRunMetadata(fsPath: string): Promise<void> {
       error: message,
     };
     postRunPanelState();
+  } finally {
+    if (cancelRunMetadata === cancel) cancelRunMetadata = undefined;
   }
 }
 
@@ -1181,7 +1237,7 @@ function mergeStoppedRunBuffers(
     return {
       ...buffer,
       loadedPath: binding,
-      loadedFrames: loaded?.loadedFrames ?? null,
+      loadedSamples: loaded?.loadedSamples ?? null,
       loadedChannels: loaded?.loadedChannels ?? null,
       loadedSampleRate: loaded?.loadedSampleRate ?? null,
       waveform: loaded?.waveform ?? null,
@@ -1191,20 +1247,51 @@ function mergeStoppedRunBuffers(
 
 async function loadStoppedRunMetadata(
   fsPath: string,
+  signal: AbortSignal,
   onSources?: (graph: unknown) => void,
 ): Promise<RunStoppedMetadata> {
-  const { command, extraArgs } = ondaExecutableConfig();
   const { sampleRateHz, blockFrames } = ondaRunAudioSettings();
-  const fastMath = runPanelState.fastMath;
-  const paramSmoothingSeconds = runPanelState.paramSmoothingMs / 1000;
-  const cwd =
-    vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
+  return await withOndaDaemon(fsPath, signal, async (request) => {
+    onSources?.(await request("run_sources", { path: fsPath }));
+    await request("initialize", {
+      sample_rate_hz: sampleRateHz,
+      block_samples: blockFrames,
+      fast_math: runPanelState.fastMath,
+      param_smoothing_seconds: runPanelState.paramSmoothingMs / 1000,
+    });
+    return await request("run_metadata", { path: fsPath }) ?? {};
+  }, onSources);
+}
+
+type DaemonRequest = (command: string, payload?: Record<string, unknown>) => Promise<any>;
+
+async function discoverLanguageSources(file: string, signal: AbortSignal): Promise<unknown> {
+  return withOndaDaemon(file, signal, async request => {
+    const documents = vscode.workspace.textDocuments
+      .filter(document => document.uri.scheme === "file" && document.languageId === "onda")
+      .map(document => ({path: document.uri.fsPath, version: document.version, text: document.getText()}));
+    for (const document of documents) await request("open", document);
+    return request("run_sources", {path: file});
+  });
+}
+
+/** Share the daemon framing and process cleanup between playback metadata and LSP discovery. */
+async function withOndaDaemon<T>(
+  fsPath: string,
+  signal: AbortSignal,
+  operation: (request: DaemonRequest) => Promise<T>,
+  onSources?: (graph: unknown) => void,
+): Promise<T> {
+  const { command, extraArgs, source } = ondaExecutableConfig();
+  const cwd = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath))?.uri.fsPath ?? path.dirname(fsPath);
+  if (signal.aborted) throw new Error("Metadata refresh canceled.");
 
   return await new Promise((resolve, reject) => {
     const child = childProcess.spawn(command, [...extraArgs, "daemon", "stdio"], {
       cwd,
       stdio: "pipe",
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
 
     let stdoutBuffer = "";
@@ -1218,6 +1305,10 @@ async function loadStoppedRunMetadata(
         return;
       }
       settled = true;
+      signal.removeEventListener("abort", cancel);
+      for (const request of pending.values()) {
+        request.reject(new Error("Metadata refresh ended."));
+      }
       pending.clear();
       try {
         child.stdin.end();
@@ -1225,7 +1316,7 @@ async function loadStoppedRunMetadata(
         // Ignore stdin close errors during shutdown.
       }
       try {
-        child.kill();
+        terminateRunProcessTree(child);
       } catch {
         // Ignore termination errors for already-exited children.
       }
@@ -1235,8 +1326,12 @@ async function loadStoppedRunMetadata(
     const fail = (message: string) => {
       finish(() => reject(new Error(message)));
     };
+    const cancel = () => fail("Metadata refresh canceled.");
+    signal.addEventListener("abort", cancel, { once: true });
+    child.stdin.on("error", (error: Error) => fail(error.message));
 
     const sendRequest = (commandName: string, payload?: Record<string, unknown>): Promise<any> => {
+      if (settled) return Promise.reject(new Error("Metadata refresh ended."));
       return new Promise((requestResolve, requestReject) => {
         const id = nextId++;
         pending.set(id, { resolve: requestResolve, reject: requestReject });
@@ -1300,10 +1395,11 @@ async function loadStoppedRunMetadata(
     });
 
     child.once("error", (error: Error) => {
-      fail(describeOndaExecutableError(command, error).message);
+      fail(describeOndaExecutableError(command, error, source).message);
     });
 
     child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      clearRunKillTimerIfGroupExited(child.pid);
       if (settled) {
         return;
       }
@@ -1312,23 +1408,9 @@ async function loadStoppedRunMetadata(
       fail(`daemon metadata refresh exited unexpectedly: ${reason}`);
     });
 
-    void sendRequest("run_sources", { path: fsPath })
-      .then((graph) => {
-        onSources?.(graph);
-        return sendRequest("initialize", {
-          sample_rate_hz: sampleRateHz,
-          block_samples: blockFrames,
-          fast_math: fastMath,
-          param_smoothing_seconds: paramSmoothingSeconds,
-        });
-      })
-      .then(() => sendRequest("run_metadata", { path: fsPath }))
-      .then((result) => {
-        finish(() => resolve(result ?? {}));
-      })
-      .catch((error: Error) => {
-        fail(error.message);
-      });
+    void operation(sendRequest)
+      .then((result) => finish(() => resolve(result)))
+      .catch((error: Error) => fail(error.message));
   });
 }
 
@@ -1404,7 +1486,7 @@ function handleRunStdoutLine(line: string): void {
 }
 
 // Merge new param metadata with previously-preserved user values (across restarts).
-// Default value hydration is handled by the webview (run.html).
+// The shared UI owns default-value hydration.
 function mergeRunParams(
   params: RunParamPayload[],
   existing: RunParamState[],
@@ -1430,14 +1512,15 @@ function runParamsMatchForPreservation(
   return (
     next.name === previous.name &&
     next.type === previous.type &&
-    next.default === previous.default &&
-    next.rangeMin === previous.rangeMin &&
-    next.rangeMax === previous.rangeMax &&
+    Object.is(next.default, previous.default) &&
+    Object.is(next.rangeMin, previous.rangeMin) &&
+    Object.is(next.rangeMax, previous.rangeMax) &&
     next.scale === previous.scale &&
     next.curve === previous.curve &&
     next.unit === previous.unit &&
     next.step === previous.step &&
     next.stepCount === previous.stepCount &&
+    sameEnumChoices(next.enumeration, previous.enumeration) &&
     next.scalar === previous.scalar
   );
 }
@@ -1453,7 +1536,10 @@ function mergeRunEvents(
 ): RunEventState[] {
   return events.map((event) => {
     const previous = existing.find((item) => item.name === event.name);
-    const args = event.args ?? [];
+    const args = (event.args ?? []).map((arg) => ({
+      ...arg,
+      default: arg.default == null ? arg.default : cloneRunEventValue(arg.default),
+    }));
     const compatible = previous?.args.length === args.length && args.every((arg, index) => {
       const old = previous.args[index];
       return old.name === arg.name && old.type === arg.type
@@ -1474,6 +1560,7 @@ function connectRunControl(port: number): void {
   closeRunControlSocket();
 
   const socket = net.createConnection({ host: "127.0.0.1", port });
+  let connectionError: Error | undefined;
   runControlSocket = socket;
   runControlBuffer = "";
 
@@ -1494,10 +1581,31 @@ function connectRunControl(port: number): void {
       refreshRunBuffers(),
       refreshRunEvents(),
       refreshRunDevices(),
-    ]).then(() => {
+    ]).then(async () => {
       if (runControlSocket !== socket) return;
-      reapplyCachedRunParams();
-      reapplyCachedRunBuffers();
+      if (runPanelState.error) throw new Error(runPanelState.error);
+      await reapplyCachedRunParams();
+      if (runControlSocket !== socket) return;
+      await reapplyCachedRunBuffers();
+      if (runControlSocket !== socket) return;
+      if (runPanelState.error) throw new Error(runPanelState.error);
+      runSchemaReady = true;
+      postRunPanelState();
+      // Onda's play command rebuilds the instance with the restored targets and
+      // bindings, so initialization and the first block see the same values.
+      if (runProcessingRequested) await playRunProcessing();
+    }).catch(async (error) => {
+      if (runControlSocket !== socket) return;
+      // A retry must restore again rather than play an incompletely prepared instance.
+      const stopped = stopFile({ silent: true });
+      const requestId = runRequestId;
+      await stopped;
+      if (requestId !== runRequestId) return;
+      runPanelState = {
+        ...runPanelState,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      postRunPanelState();
     });
     if (runPanelState.running) {
       startScopePolling();
@@ -1520,24 +1628,17 @@ function connectRunControl(port: number): void {
     }
   });
   socket.on("error", (error: Error) => {
-    if (runControlSocket !== socket) return;
-    stopScopePolling();
-    runPanelState = {
-      ...runPanelState,
-      connected: false,
-      error: error.message,
-    };
-    postRunPanelState();
+    connectionError = error;
   });
   socket.on("close", () => {
     if (runControlSocket !== socket) return;
-    stopScopePolling();
-    runControlSocket = undefined;
-    runControlBuffer = "";
-    rejectPendingRunRequests(new Error("Run control connection closed."));
+    // Stop the disconnected process without canceling a newer Run awaiting its input.
+    void stopFile({ silent: true, preservePendingStart: true });
     runPanelState = {
       ...runPanelState,
-      connected: false,
+      error: "Onda playback stopped because its control connection "
+        + (connectionError ? `failed (${connectionError.message}). ` : "closed unexpectedly. ")
+        + "Run again to restart playback.",
     };
     postRunPanelState();
   });
@@ -1545,6 +1646,12 @@ function connectRunControl(port: number): void {
 
 function closeRunControlSocket(): void {
   stopScopePolling();
+  // Recompile/disconnect may interrupt loading. Replay the latest edit on the
+  // replacement instance rather than falling back to the last acknowledged file.
+  for (const [name, binding] of pendingRunBufferBindings) {
+    preservedRunBufferBindings.set(name, binding.filePath);
+  }
+  pendingRunBufferBindings.clear();
   const socket = runControlSocket;
   runControlSocket = undefined;
   runControlBuffer = "";
@@ -1559,6 +1666,7 @@ function handleRunControlLine(line: string): void {
     ok?: boolean;
     result?: unknown;
     error?: string;
+    cancelled?: boolean;
   };
   const logState = applyRunOutputNotification(
     runPanelState,
@@ -1581,7 +1689,9 @@ function handleRunControlLine(line: string): void {
     return;
   }
   pendingRunRequests.delete(payload.id);
-  if (payload.ok) {
+  if (payload.cancelled) {
+    pending.reject(new RunControlCancelled("Run control request was superseded."));
+  } else if (payload.ok) {
     pending.resolve(payload.result);
   } else {
     pending.reject(new Error(payload.error ?? "Run control request failed."));
@@ -1675,22 +1785,27 @@ async function refreshRunEvents(): Promise<void> {
 }
 
 async function reapplyCachedRunParams(): Promise<void> {
-  for (const param of runPanelState.params) {
-    if (param.value === null) {
-      continue;
-    }
-    queueRunParamSend(param.name, param.value);
-  }
+  await Promise.all(runPanelState.params
+    .filter((param) => param.value !== null)
+    .map((param) => sendRunControlRequest("setParam", { name: param.name, value: param.value })));
 }
 
-function reapplyCachedRunBuffers(): void {
+async function reapplyCachedRunBuffers(): Promise<void> {
+  const socket = runControlSocket;
   const declaredBuffers = new Set(runPanelState.buffers.map((buffer) => buffer.name));
-  for (const [name, filePath] of preservedRunBufferBindings) {
-    if (!declaredBuffers.has(name)) {
-      continue;
-    }
-    if (filePath === null) void clearRunBuffer(name);
-    else void bindRunBufferFile(name, filePath, { silent: true });
+  const restored = new Map<string, string | null>();
+  while (socket === runControlSocket) {
+    const bindings = [...preservedRunBufferBindings].filter(([name, filePath]) =>
+      declaredBuffers.has(name) && (!restored.has(name) || restored.get(name) !== filePath)
+    );
+    if (!bindings.length) return;
+    await Promise.all(bindings.map(async ([name, filePath]) => {
+      await sendRunBufferBinding(name, filePath);
+      restored.set(name, filePath);
+    }));
+    if (socket !== runControlSocket) return;
+    await refreshRunBuffers();
+    // Edits made while a file was loading are cached and restored on this pass.
   }
 }
 
@@ -1715,65 +1830,22 @@ function updateRunParamState(
   return nextParam;
 }
 
-function declaredParamDefaultValue(
-  param: Pick<RunParamPayload, "type" | "default" | "rangeMin">,
-): RunScalarValue {
-  if (param.type === "bool") {
-    if (param.default !== null && param.default !== undefined) {
-      return param.default !== 0;
-    }
-    return false;
-  }
-  if (param.default !== null && param.default !== undefined) {
-    return param.default;
-  }
-  if (param.rangeMin !== null && param.rangeMin !== undefined) {
-    return param.rangeMin;
-  }
-  return 0;
-}
-
 function initialEventArgValue(
   arg: Pick<RunEventArgPayload, "type" | "default" | "value">,
 ): RunEventValue {
-  if (!/^(?:f32|f64|i32|i64|bool)(?:\[[0-9]*\])?$/.test(arg.type)) {
-    return cloneRunEventValue(arg.default ?? arg.value ?? {});
-  }
-  if (Array.isArray(arg.default)) {
-    return arg.default.map(cloneRunEventValue);
-  }
-  if (arg.default !== null && arg.default !== undefined) {
-    if (arg.type === "bool") {
-      return Boolean(arg.default);
-    }
-    if (arg.type === "i64") {
-      return String(arg.default);
-    }
-    const defaultValue = Number(arg.default);
-    return Number.isFinite(defaultValue) ? defaultValue : 0;
-  }
-  if (arg.type === "bool") {
-    if (arg.value !== null && arg.value !== undefined) {
-      if (Array.isArray(arg.value)) {
-        return arg.value.map(cloneRunEventValue);
-      }
-      return arg.value !== 0;
-    }
-    return false;
-  }
-  if (Array.isArray(arg.value)) {
-    return arg.value.map(cloneRunEventValue);
-  }
-  if (arg.value !== null && arg.value !== undefined) {
-    if (arg.type === "i64") {
-      return String(arg.value);
-    }
-    return arg.value;
-  }
+  // Onda supplies the complete logical default, including structured payloads.
+  const value = arg.default ?? arg.value;
+  if (value !== null && value !== undefined) return cloneRunEventValue(value);
+  if (arg.type === "bool") return false;
+  if (!/^(?:f32|f64|i32|i64)$/.test(arg.type)) return {};
   return arg.type === "i64" ? "0" : 0;
 }
 
 function cloneRunEventValue(value: RunEventValue): RunEventValue {
+  // Keep special floats intact across VS Code's JSON message serialization.
+  if (typeof value === "number") {
+    return wireRunFloat(value);
+  }
   if (Array.isArray(value)) {
     return value.map(cloneRunEventValue);
   }
@@ -1783,10 +1855,6 @@ function cloneRunEventValue(value: RunEventValue): RunEventValue {
     );
   }
   return value;
-}
-
-function runParamDefaultValue(param: RunParamState): RunScalarValue {
-  return declaredParamDefaultValue(param);
 }
 
 function queueRunParamSend(name: string, value: RunScalarValue): void {
@@ -1855,6 +1923,7 @@ function applyRunParamChange(name: string, value: RunScalarValue): void {
   if (value === null) {
     return;
   }
+  if (typeof value === "number") value = wireRunFloat(value);
   const param = updateRunParamState(name, (current) => ({
     ...current,
     value,
@@ -1863,6 +1932,7 @@ function applyRunParamChange(name: string, value: RunScalarValue): void {
     return;
   }
 
+  postRunParameterValues([param]);
   if (!runPanelState.connected) {
     return;
   }
@@ -1930,24 +2000,47 @@ async function triggerRunEvent(
   }
 }
 
-function resetRunParams(): void {
+function postRunParameterValues(params: RunParamState[]): void {
+  if (!runPanel || !runPanelReady || !lastPostedRunState || lastPostedRunState.path !== runPanelState.path) {
+    postRunPanelState();
+    return;
+  }
+  lastPostedRunState.params = runPanelState.params;
+  void runPanel.webview.postMessage({
+    type: "parameterValues",
+    state: { params: params.map(({ name, value }) => ({ name, value })) },
+  });
+}
+
+async function resetRunParams(): Promise<void> {
   clearRunParamDisrun();
+  const resetId = ++runParamResetId;
+  const socket = runControlSocket;
+  const previous = runPanelState.params;
+  const params = previous.map((param) => ({ ...param, value: defaultRunParamValue(param) }));
   runPanelState = {
     ...runPanelState,
     error: undefined,
-    params: runPanelState.params.map((param) => ({
-      ...param,
-      value: runParamDefaultValue(param),
-    })),
+    params,
   };
+  postRunParameterValues(runPanelState.params);
   postRunPanelState();
 
   if (!runPanelState.connected) {
     return;
   }
 
-  for (const param of runPanelState.params) {
-    queueRunParamSend(param.name, param.value);
+  try {
+    await sendRunControlRequest("resetParams");
+  } catch (error) {
+    if (socket !== runControlSocket || resetId !== runParamResetId) return;
+    runPanelState = {
+      ...runPanelState,
+      // Preserve edits made while the reset was awaiting its acknowledgement.
+      params: runPanelState.params === params ? previous : runPanelState.params,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    postRunPanelState();
   }
 }
 
@@ -1983,9 +2076,11 @@ async function setRunBufferBinding(
   filePath: string | null,
   options?: { silent?: boolean },
 ): Promise<void> {
-  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed) {
+  const updateId = (runBufferBindingUpdates.get(name) ?? 0) + 1;
+  runBufferBindingUpdates.set(name, updateId);
+  if (!runPanelState.connected || !runControlSocket || runControlSocket.destroyed || !runSchemaReady) {
     if (!runPanelState.buffers.some((buffer) => buffer.name === name)) return;
-    // Stopped saves close the audio process. Retain edits for the next Play.
+    // Retain edits while stopped or restoring, before the next Play.
     preservedRunBufferBindings.set(name, filePath);
     runPanelState = {
       ...runPanelState,
@@ -1996,12 +2091,11 @@ async function setRunBufferBinding(
     return;
   }
   const socket = runControlSocket;
+  const pending = { filePath };
+  pendingRunBufferBindings.set(name, pending);
   try {
-    await sendRunControlRequest(
-      filePath === null ? "clearBuffer" : "bindBufferWav",
-      filePath === null ? { name } : { name, path: filePath },
-    );
-    if (socket !== runControlSocket) return;
+    await sendRunBufferBinding(name, filePath);
+    if (socket !== runControlSocket || updateId !== runBufferBindingUpdates.get(name)) return;
     preservedRunBufferBindings.set(name, filePath);
     runPanelState = {
       ...runPanelState,
@@ -2009,7 +2103,8 @@ async function setRunBufferBinding(
     };
     await refreshRunBuffers();
   } catch (error) {
-    if (socket !== runControlSocket) return;
+    if (socket !== runControlSocket || updateId !== runBufferBindingUpdates.get(name)
+      || error instanceof RunControlCancelled) return;
     const message = error instanceof Error ? error.message : String(error);
     runPanelState = {
       ...runPanelState,
@@ -2019,11 +2114,21 @@ async function setRunBufferBinding(
     if (!options?.silent) {
       void vscode.window.showErrorMessage(`Failed to bind run buffer '${name}': ${message}`);
     }
+  } finally {
+    if (pendingRunBufferBindings.get(name) === pending) pendingRunBufferBindings.delete(name);
   }
+}
+
+function sendRunBufferBinding(name: string, filePath: string | null): Promise<void> {
+  return sendRunControlRequest(
+    filePath === null ? "clearBuffer" : "bindBufferWav",
+    filePath === null ? { name } : { name, path: filePath },
+  );
 }
 
 async function chooseRunBufferFile(name: string): Promise<void> {
   const inputPath = runPanelState.path;
+  const requestId = runRequestId;
   const picked = await vscode.window.showOpenDialog({
     canSelectMany: false,
     openLabel: `Bind '${name}' buffer`,
@@ -2032,7 +2137,7 @@ async function chooseRunBufferFile(name: string): Promise<void> {
     },
   });
   const filePath = picked?.[0]?.fsPath;
-  if (!filePath || inputPath !== runPanelState.path) {
+  if (!filePath || requestId !== runRequestId || inputPath !== runPanelState.path) {
     return;
   }
   await bindRunBufferFile(name, filePath);
@@ -2044,6 +2149,8 @@ function clearRunPanelMemory(): void {
   runSourceFiles.clear();
   clearRunParamDisrun();
   preservedRunBufferBindings.clear();
+  runBufferBindingUpdates.clear();
+  pendingRunBufferBindings.clear();
   runPanelState = {
     ...runPanelState,
     ...initialRunLogState(),
@@ -2074,6 +2181,21 @@ function normalizeDeviceSelection(name: string | null | undefined): string | nul
   }
   const trimmed = name.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+async function updateRunSettings(sampleRateHz: unknown, blockSamples: unknown): Promise<void> {
+  if (typeof sampleRateHz !== "number" || !Number.isInteger(sampleRateHz)
+    || sampleRateHz < 1 || sampleRateHz > 768000
+    || typeof blockSamples !== "number" || !Number.isInteger(blockSamples)
+    || blockSamples < 1 || blockSamples > 65536) return;
+  if (sampleRateHz === runPanelState.sampleRateHz && blockSamples === runPanelState.blockSamples) return;
+  runAudioOverrides = { sampleRateHz, blockFrames: blockSamples };
+  runPanelState = { ...runPanelState, sampleRateHz, blockSamples };
+  if (runPanelState.path) {
+    await restartRunForSourceChanges();
+  } else {
+    postRunPanelState();
+  }
 }
 
 async function updateRunDeviceSelection(
@@ -2198,31 +2320,59 @@ function ensureRunPanel(preserveFocus = false): void {
   );
   runPanelReady = false;
   const panel = runPanel;
+  runPanel.onDidChangeViewState(() => {
+    if (runPanel !== panel) return;
+    syncScopeCapture();
+    pollScopeData();
+  });
   runPanel.onDidDispose(() => {
     if (runPanel !== panel) return;
     stopScopePolling();
     runPanelReady = false;
+    lastPostedRunState = undefined;
     runPanel = undefined;
     void stopFile({ silent: true });
     clearRunPanelMemory();
   });
   runPanel.webview.onDidReceiveMessage(async (message: unknown) => {
+    if (runPanel !== panel) return;
     const payload = message as {
       type?: string;
       path?: string;
       name?: string | null;
       value?: RunScalarValue;
       values?: RunEventValue[];
+      engineGeneration?: string | null;
       filePath?: string;
       key?: number;
       velocity?: number;
       pressed?: boolean;
       milliseconds?: number;
+      columns?: number;
+      visible?: boolean;
+      meter?: boolean;
+      sampleRateHz?: number;
+      blockSamples?: number;
+      enabled?: boolean;
+      mode?: "dark" | "light";
     };
     switch (payload.type) {
-      case "webviewReady":
+      case "scopeConfig":
+        if (Number.isInteger(payload.columns) && payload.columns! >= 1 && payload.columns! <= 512 && scopeColumns !== payload.columns) {
+          scopeColumns = payload.columns!;
+          ++scopePollingEpoch;
+          scopePollingInFlight = false;
+        }
+        scopeViewVisible = payload.visible === true;
+        scopeMeterVisible = payload.meter === true;
+        syncScopeCapture();
+        pollScopeData();
+        break;
+      case "uiReady":
         runPanelReady = true;
+        lastPostedRunState = undefined;
         postRunPanelState();
+        syncScopeCapture();
         if (runPanelState.connected) {
           void Promise.all([
             refreshRunParams(),
@@ -2239,7 +2389,7 @@ function ensureRunPanel(preserveFocus = false): void {
         await pauseRunProcessing();
         break;
       case "resetParams":
-        resetRunParams();
+        await resetRunParams();
         break;
       case "resetEventArguments":
         resetRunEventArguments();
@@ -2262,8 +2412,28 @@ function ensureRunPanel(preserveFocus = false): void {
       case "setParamSmoothing":
         await updateRunParamSmoothing(payload.milliseconds);
         break;
+      case "setRunSettings":
+        await updateRunSettings(payload.sampleRateHz, payload.blockSamples);
+        break;
+      case "setFastMath":
+        if (typeof payload.enabled === "boolean" && payload.enabled !== runPanelState.fastMath) {
+          runPanelState = { ...runPanelState, fastMath: payload.enabled };
+          if (runPanelState.path) await restartRunForSourceChanges();
+          else postRunPanelState();
+        }
+        break;
+      case "setTheme":
+        if (payload.mode === "dark" || payload.mode === "light") {
+          const config = vscode.workspace.getConfiguration("onda");
+          const target = config.inspect("run.theme")?.workspaceValue === undefined
+            ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace;
+          await config.update("run.theme", payload.mode, target);
+          postRunPanelState();
+        }
+        break;
       case "triggerEvent":
-        if (typeof payload.name === "string") {
+        if (typeof payload.name === "string" && runSchemaReady
+          && payload.engineGeneration === String(runEngineGeneration)) {
           await triggerRunEvent(payload.name, payload.values ?? []);
         }
         break;
@@ -2277,7 +2447,9 @@ function ensureRunPanel(preserveFocus = false): void {
         await updateRunDeviceSelection("midi", payload.name);
         break;
       case "midiNote":
-        triggerRunMidiNote(payload.key, payload.velocity, payload.pressed);
+        if (runSchemaReady && payload.engineGeneration === String(runEngineGeneration)) {
+          triggerRunMidiNote(payload.key, payload.velocity, payload.pressed);
+        }
         break;
       case "chooseBufferFile":
         if (typeof payload.name === "string") {
@@ -2303,7 +2475,7 @@ function ensureRunPanel(preserveFocus = false): void {
         break;
     }
   });
-  runPanel.webview.html = renderSharedRunHtml(runPanel.webview);
+  runPanel.webview.html = renderGpuRunHtml(runPanel.webview);
   postRunPanelState();
   if (runPanelState.connected) {
     void Promise.all([
@@ -2322,146 +2494,137 @@ function revealRunPanel(preserveFocus = false): void {
   runPanel.reveal(runPanel.viewColumn, preserveFocus);
 }
 
+let lastPostedRunState: Record<string, unknown> | undefined;
 function postRunPanelState(options: { resetEventArguments?: boolean } = {}): void {
   if (!runPanel) {
     return;
   }
-  void runPanel.webview.postMessage({
-    type: "state",
-    state: {
-      ...runPanelState,
-      processingRequested: runProcessingRequested,
-      // Undefined fields are omitted when VS Code serializes webview messages.
-      // Send an explicit clear so the view does not retain a previous error.
-      error: runPanelState.error ?? null,
-      ondaVersion: client?.initializeResult?.serverInfo?.version ?? undefined,
-      ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
-      supportsSourceSelection: false,
-      supportsProjectExport: Boolean(
-        runPanelState.path && isOndaSourcePath(runPanelState.path),
-      ),
-      canExportProject: Boolean(
-        runPanelState.path && isOndaSourcePath(runPanelState.path),
-      ),
-      supportsTransport: true,
-      supportsDeviceSelection: true,
-      supportsRunSettings: false,
-      supportsParamSmoothing: true,
-      paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
-      supportsScope: true,
-    },
-  });
+  const state: Record<string, unknown> = {
+    ...runPanelState,
+    processingRequested: runProcessingRequested,
+    schemaReady: runSchemaReady,
+    engineGeneration: String(runEngineGeneration),
+    // Undefined fields are omitted when VS Code serializes webview messages.
+    // Send an explicit clear so the view does not retain a previous error.
+    error: runPanelState.error ?? null,
+    ondaVersion: client?.initializeResult?.serverInfo?.version ?? undefined,
+    ...(options.resetEventArguments ? { resetEventArguments: true } : {}),
+    supportsSourceSelection: false,
+    supportsProjectExport: Boolean(
+      runPanelState.path && isOndaSourcePath(runPanelState.path),
+    ),
+    canExportProject: Boolean(
+      runPanelState.path && isOndaSourcePath(runPanelState.path),
+    ),
+    supportsTransport: true,
+    supportsDeviceSelection: true,
+    supportsMidiInputSelection: true,
+    supportsRunSettings: true,
+    supportsFastMath: true,
+    canSetSampleRate: true,
+    canSetBlockSize: true,
+    supportsParamSmoothing: true,
+    paramSmoothingDefaultMs: DEFAULT_PARAM_SMOOTHING_MS,
+    supportsScope: true,
+    themeMode: ondaRunThemeSetting(),
+  };
+  const patch = !lastPostedRunState || !runPanelReady || state.path !== lastPostedRunState.path
+    ? state
+    : Object.fromEntries(Object.entries(state).filter(([key, value]) => !Object.is(value, lastPostedRunState![key])));
+  // Reset is an instruction, so consecutive requests must each cross the bridge.
+  if (options.resetEventArguments) patch.resetEventArguments = true;
+  if (runPanelReady) lastPostedRunState = state;
+  if (Object.keys(patch).length > 0) {
+    void runPanel.webview.postMessage({ type: "state", state: patch });
+  }
 }
 
 function startScopePolling(): void {
-  stopScopePolling();
-  scopePollingTimer = setInterval(pollScopeData, SCOPE_POLL_INTERVAL_MS);
+  scopePollingRequested = true;
+  syncScopeCapture();
 }
 
 function stopScopePolling(): void {
-  if (scopePollingTimer !== undefined) {
-    clearInterval(scopePollingTimer);
-    scopePollingTimer = undefined;
+  scopePollingRequested = false;
+  syncScopeCapture();
+}
+
+function syncScopeCapture(): boolean {
+  const socketChanged = scopeCaptureSocket !== runControlSocket;
+  scopeCaptureSocket = runControlSocket;
+  const active = Boolean(
+    scopePollingRequested && runPanelState.running && runPanelState.connected &&
+    runPanel && runPanelReady && runPanel.visible !== false,
+  );
+  const mode = !active ? "off" : scopeViewVisible ? "waveform" : scopeMeterVisible ? "meter" : "off";
+  if (socketChanged || mode !== scopeCaptureMode) {
+    sendRunControlNotification("setScopeCaptureMode", { value: mode });
+    scopeCaptureMode = mode;
+    ++scopePollingEpoch;
+    scopePollingInFlight = false;
+    if (scopePollingTimer !== undefined) clearInterval(scopePollingTimer);
+    scopePollingTimer = mode === "off" ? undefined : setInterval(
+      pollScopeData, SCOPE_POLL_INTERVAL_MS,
+    );
   }
-  scopePollingInFlight = false;
+  return mode !== "off";
 }
 
 function pollScopeData(): void {
-  if (scopePollingInFlight || !runPanelState.connected || !runPanel || !runPanelReady) {
-    return;
-  }
+  if (!syncScopeCapture() || scopePollingInFlight) return;
   scopePollingInFlight = true;
   const socket = runControlSocket;
-  sendRunControlRequest<{ channels: number; samples: number[] }>("getScopeData", { maxFrames: SCOPE_MAX_FRAMES })
+  const epoch = scopePollingEpoch;
+  sendRunControlRequest<{ channels?: number; peaks?: number[]; samples?: number[]; packet?: string }>("getScopeData", {
+    maxFrames: SCOPE_MAX_FRAMES,
+    columns: scopeColumns,
+  })
     .then((result) => {
-      if (socket !== runControlSocket) return;
+      if (socket !== runControlSocket || epoch !== scopePollingEpoch) return;
       scopePollingInFlight = false;
-      if (runPanel && runPanelReady) {
-        void runPanel.webview.postMessage({
+      if (syncScopeCapture()) {
+        void runPanel!.webview.postMessage({
           type: "scopeData",
           channels: result.channels,
-          samples: result.samples,
+          peaks: result.peaks,
+          samples: scopeViewVisible ? result.samples : undefined,
+          packet: scopeViewVisible ? result.packet : undefined,
         });
       }
     })
     .catch(() => {
-      if (socket !== runControlSocket) return;
+      if (socket !== runControlSocket || epoch !== scopePollingEpoch) return;
       scopePollingInFlight = false;
     });
 }
 
-function renderSharedRunHtml(webview: vscode.Webview): string {
-  const runTheme = ondaRunThemeSetting();
-  const csp = [
-    "default-src 'none'",
-    "img-src data: https:",
-    `style-src ${webview.cspSource} 'unsafe-inline'`,
-    `script-src ${webview.cspSource} 'unsafe-inline'`,
-  ].join("; ");
-
-  // Locate the run HTML.
-  // In a packaged extension it lives at <extensionPath>/out/run.html (copied at build time).
-  // During development it also exists at <extensionPath>/ui/run/run.html.
-  const extRoot = extensionContext?.extensionPath ?? __dirname;
-  const candidates = [
-    path.join(extRoot, "out", "run.html"),
-    path.join(extRoot, "ui", "run", "run.html"),
-  ];
-  let html: string | undefined;
-  let resolvedPath = "";
-  for (const candidate of candidates) {
-    try {
-      html = fs.readFileSync(candidate, "utf-8");
-      resolvedPath = candidate;
-      break;
-    } catch {
-      // Try next candidate.
-    }
+function renderGpuRunHtml(webview: vscode.Webview): string {
+  const root = extensionContext?.extensionPath ?? __dirname;
+  const htmlPath = path.join(root, "out", "gpu", "index.html");
+  if (!fs.existsSync(htmlPath)) {
+    return '<html><body style="font:14px system-ui;color:#dce8f4;background:#07101a;padding:24px">Onda UI could not be loaded. Reinstall the extension.</body></html>';
   }
-  if (html === undefined) {
-    return `<!DOCTYPE html><html><body style="color:#e07a7a;padding:20px;font:14px sans-serif">
-      <p>Could not load run UI.</p>
-      <p>Searched:<br/>${candidates.map((c) => `<code>${c}</code>`).join("<br/>")}</p>
-    </body></html>`;
-  }
-
-  for (const asset of ["param-control.js", "buffers.js", "number-input.js"]) {
-    const assetUri = webview.asWebviewUri(
-      vscode.Uri.file(path.join(path.dirname(resolvedPath), asset)),
-    );
-    html = html.replace(`./${asset}`, assetUri.toString());
-  }
-
-  // Inject the VS Code host bridge before the page script runs, and add the CSP header.
-  const bridgeScript = `<script>window.__hostBridge = { mode: "vscode", theme: "${runTheme}" };</script>`;
-  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}" />`;
-
-  // Insert CSP meta after <head> and bridge script before the main <script>.
-  html = html.replace("<head>", `<head>\n    ${cspMeta}`);
-  html = html.replace("<script>", `${bridgeScript}\n    <script>`);
-
-  return html;
+  const hostUri = webview.asWebviewUri(vscode.Uri.file(path.join(root, "out", "gpu", "host.js")));
+  const csp = `default-src 'none'; script-src ${webview.cspSource} 'wasm-unsafe-eval'; connect-src ${webview.cspSource}; font-src ${webview.cspSource}; style-src 'unsafe-inline'`;
+  const baseUri = webview.asWebviewUri(vscode.Uri.file(path.join(root, "out", "gpu"))).toString() + "/";
+  return fs.readFileSync(htmlPath, "utf8")
+    .replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}"><base href="${baseUri}">`)
+    .replace("./host.js", hostUri.toString());
 }
 
-function ondaRunThemeSetting(): "auto" | "dark" | "light" {
+function ondaRunThemeSetting(): "dark" | "light" | null {
   const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("run.theme", "auto");
+  const value = config.get<string | null>("run.theme", null);
   if (value === "dark" || value === "light") {
     return value;
   }
-  return "auto";
-}
-
-function ondaRunHostSetting(): "webview" | "egui" {
-  const config = vscode.workspace.getConfiguration("onda");
-  const value = config.get<string>("run.host", "webview");
-  return value === "egui" ? "egui" : "webview";
+  return null;
 }
 
 function ondaRunAudioSettings(): { sampleRateHz: number; blockFrames: number; args: string[] } {
   const config = vscode.workspace.getConfiguration("onda");
-  const sampleRate = explicitPositiveIntegerSetting(config, "run.sampleRate");
-  const blockSize = explicitPositiveIntegerSetting(config, "run.blockSize");
+  const sampleRate = runAudioOverrides.sampleRateHz ?? explicitPositiveIntegerSetting(config, "run.sampleRate");
+  const blockSize = runAudioOverrides.blockFrames ?? explicitPositiveIntegerSetting(config, "run.blockSize");
   const args: string[] = [];
   if (sampleRate !== undefined) {
     args.push("--sample-rate", sampleRate.toString());
@@ -2495,15 +2658,9 @@ function explicitPositiveIntegerSetting(
     : undefined;
 }
 
-async function startClient(context: vscode.ExtensionContext): Promise<void> {
-  const { command, extraArgs } = ondaExecutableConfig();
+async function startClient(): Promise<void> {
+  const { command, extraArgs, source } = ondaExecutableConfig();
   const args = [...extraArgs, "lsp"];
-  const fileWatchers = [
-    vscode.workspace.createFileSystemWatcher("**/*.onda"),
-    vscode.workspace.createFileSystemWatcher("**/*.on"),
-  ];
-  context.subscriptions.push(...fileWatchers);
-
   const serverOptions: ServerOptions = {
     run: {
       command,
@@ -2517,23 +2674,53 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     },
   };
 
+  const dependencies = new LanguageDependencies(
+    discoverLanguageSources,
+    (files) => {
+      void activeClient.sendNotification("workspace/didChangeWatchedFiles", {
+        changes: files.map(file => ({ uri: vscode.Uri.file(file).toString(), type: 2 })),
+      }).catch(error => serverOutput?.appendLine(`Could not notify Onda of source changes: ${error}`));
+    },
+    (file, error) => serverOutput?.appendLine(`Could not watch Onda dependencies for ${file}: ${String(error)}`),
+  );
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "onda" }],
-    synchronize: {
-      fileEvents: fileWatchers,
+    middleware: {
+      didOpen: async (document, next) => {
+        await next(document);
+        void dependencies.open(document.uri.fsPath);
+      },
+      didSave: async (document, next) => {
+        await next(document);
+        void dependencies.open(document.uri.fsPath);
+      },
+      didChange: async (event, next) => {
+        await next(event);
+        dependencies.change(event.document.uri.fsPath);
+      },
+      didClose: async (document, next) => {
+        dependencies.close(document.uri.fsPath);
+        await next(document);
+      },
     },
     outputChannel: serverOutput,
     traceOutputChannel: serverOutput,
   };
 
-  client = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
+  const activeClient = new LanguageClient("onda-lsp", "Onda Language Server", serverOptions, clientOptions);
+  client = activeClient;
+  languageDependencies = dependencies;
   try {
-    await client.start();
+    await activeClient.start();
     postRunPanelState();
   } catch (error) {
+    dependencies.dispose();
+    languageDependencies = undefined;
     client = undefined;
-    const description = describeOndaExecutableError(command, error);
+    const description = describeOndaExecutableError(command, error, source);
     serverOutput?.appendLine(`Failed to start: ${description.message}`);
-    await showOndaCommandError("Onda language server could not start", command, error);
+    // A notification can stay open indefinitely; it must not hold the restart queue.
+    void showOndaCommandError("Onda language server could not start", command, error, source)
+      .catch((notificationError) => serverOutput?.appendLine(`Failed to show compiler error: ${notificationError}`));
   }
 }

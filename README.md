@@ -2,113 +2,49 @@
   <img src="assets/png/onda-logo-dark-circle.png" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
 </h1>
 
-This repo contains the VS Code extension for the [Onda](https://onda-lang.org) audio programming language.
+VS Code extension for the [Onda](https://onda-lang.org) audio programming language. The extension ships with the embedded
+compiler, which is used for both LSP support and compilation.
 
-It provides:
+Supports `.onda`, `.on`, and `.ondaproject` files.
 
-- `.onda`, `.on`, and `.ondaproject` filetype detection
-- regex syntax highlighting
-- builtin LSP startup through `onda lsp`
-- `Onda: Run` which launches the embedded webview for a source or project
-- project creation and source-only project export through `onda project`
-
-## Requirements
-
-- VS Code 1.90 or newer
-- Onda 0.8.37 or newer
-- an `onda` executable available on `PATH`, or an explicit configured path
+Language services track dependencies from unsaved editor contents, including changes in
+imported files. External dependency edits refresh diagnostics without saving the entry.
 
 ## Install
 
-This extension is available on Open VSX:
+Install from the [Microsoft Marketplace](https://marketplace.visualstudio.com/items?itemName=onda-lang.onda-vscode)
+or [Open VSX](https://open-vsx.org/extension/onda-lang/onda-vscode), or use
+**Extensions: Install from VSIX…** for a packaged build.
 
-- https://open-vsx.org/extension/onda-lang/onda-vscode
+## Commands
 
-### Option 1: install a `.vsix`
-
-If you already have a packaged `.vsix`, install it with:
-
-- VS Code Command Palette: `Extensions: Install from VSIX...`
-
-### Option 2: build a `.vsix` locally from this repo
-
-From the repo root:
-
-```bash
-npm install
-npm run compile
-npx @vscode/vsce package
-```
-
-That produces a `.vsix` file in the repo root, which you can then install like the packaged version.
+- **Onda: Run** opens the shared run UI for a source or project selected in the
+  editor or Explorer. Saved source/dependency changes reload the running patch.
+- **Onda: Run with Fast Math** enables `--fast-math` for that session, allowing
+  floating-point optimizations that may change results. Regular **Onda: Run**
+  returns to normal math.
+- **Onda: Stop** stops playback.
+- **Onda: Create Project…** creates an empty project or packages an active source.
+- **Onda: Save as Project…** packages the active/running source and its currently
+  bound buffer files into a new portable project directory.
+- **Onda: Restart Language Server** restarts language services.
 
 ## Configuration
 
-By default the extension starts:
+| Setting | Default |
+| --- | --- |
+| `onda.compiler.source` | `bundled`; choose `external` to use a custom compiler. |
+| `onda.exec.path` | Used with `external`; unset finds `onda` on `PATH`. |
+| `onda.exec.args` | Empty; arguments before each compiler subcommand. |
+| `onda.run.theme` | Unset (`null`) detects VS Code's appearance when the panel opens; accepts `dark` or `light`. |
+| `onda.run.sampleRate` | 48,000 Hz for the next run. This can also be changed in the run window. |
+| `onda.run.blockSize` | 512 frames for the next run. This can also be changed in the run window. |
 
-```text
-onda lsp
-```
-
-You can configure the executable and run host in VS Code settings:
-
-- `onda.server.path`
-- `onda.server.args`
-- `onda.run.host` (`webview` or `egui`)
-- `onda.run.theme` (`auto`, `dark`, or `light`)
-- `onda.run.sampleRate` (default: `48000` Hz)
-- `onda.run.blockSize` (default: `512` frames)
-
-Example settings:
+To use a custom compiler:
 
 ```json
 {
-  "onda.server.path": "C:/path/to/onda.exe",
-  "onda.server.args": [],
-  "onda.run.sampleRate": 48000,
-  "onda.run.blockSize": 512
+  "onda.compiler.source": "external",
+  "onda.exec.path": "/path/to/onda"
 }
 ```
-
-Or on macOS/Linux:
-
-```json
-{
-  "onda.server.path": "/path/to/onda"
-}
-```
-
-The sample rate and block size are passed to both the embedded webview and
-native egui run hosts. Changing either setting takes effect the next time you
-run a file.
-
-The run panel's **Smooth** control adjusts parameter smoothing live. It starts at
-30 ms; set it to 0 to disable smoothing, or double-click to restore 30 ms. The
-chosen duration is preserved across source reloads and run restarts.
-
-## Using the extension
-
-Open an `.onda` or `.on` file and the extension will activate automatically.
-
-Available commands:
-
-- `Onda: Run`
-- `Onda: Run with Fast Math`
-- `Onda: Stop`
-- `Onda: Create Project…`
-- `Onda: Save as Project…`
-- `Onda: Restart Language Server`
-
-`Onda: Run` accepts `.onda`, `.on`, and `.ondaproject` files from the active editor or Explorer,
-starts the run transport, and opens the run UI.
-
-`Onda: Run with Fast Math` enables Onda's `--fast-math` compiler option for that
-run session in either host. Find it in the Command Palette or the file's Explorer
-context menu. Fast math allows floating-point optimizations that can change
-numerical results. The run header shows **Fast Math** while enabled. Saving the
-source, changing devices, or using the panel's Play button keeps the session's
-mode. Use regular `Onda: Run` to return to normal math. No setting is saved.
-
-`Onda: Create Project…` creates an empty project or packages the active Onda source. `Onda: Save as
-Project…` packages the active or running source together with buffer files currently bound in the
-run panel. Both commands create a new portable project folder through the `onda project` CLI.

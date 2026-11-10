@@ -86,7 +86,7 @@
         },
         {
           "name": "meta.declaration.type.onda",
-          "match": "^(\\s*)(proc|processor|struct)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "^(\\s*)(proc|processor|struct|enum)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "2": {
               "name": "storage.type.block.onda"

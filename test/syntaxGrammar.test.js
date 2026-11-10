@@ -70,6 +70,16 @@ test("Onda 0.8 declarations and control words have fallback highlighting", () =>
   }
 });
 
+test("enum declarations have fallback type highlighting", () => {
+  const pattern = new RegExp(grammar.repository.declarations.patterns[1].match);
+  for (const source of ["enum Mode:", "  enum Mode:", "enum Mode {", "  enum Mode {"]) {
+    const match = pattern.exec(source);
+    assert.equal(match?.[2], "enum");
+    assert.equal(match?.[4], "Mode");
+  }
+  assert.equal(pattern.exec("enumeration = 0"), null);
+});
+
 test("every Onda semantic token is standard or explicitly contributed", () => {
   const contributedTypes = new Map(
     manifest.contributes.semanticTokenTypes.map((token) => [token.id, token]),

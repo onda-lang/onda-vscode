@@ -8,6 +8,8 @@ function createLifecyclePanel(settings = {}) {
   let daemonGraph = { files: ["/tmp/lifecycle.onda"], complete: true };
   let daemonMetadataGraph;
   let daemonError;
+  let holdMetadata = false;
+  const heldMetadata = [];
   const panel = createRunPanel(undefined, {
     settings,
     modules: {
@@ -26,7 +28,7 @@ function createLifecyclePanel(settings = {}) {
           stderr: Object.assign(new EventEmitter(), { setEncoding() {} }),
           kill() { this.killed = true; },
         });
-        child.stdin = { end() {}, write(line) {
+        child.stdin = Object.assign(new EventEmitter(), { end() {}, write(line) {
           const request = JSON.parse(line);
           daemonRequests.push(request);
           const error = request.command === "run_metadata" ? daemonError : undefined;
@@ -37,8 +39,10 @@ function createLifecyclePanel(settings = {}) {
             outputChannels: 2,
             sources: daemonMetadataGraph,
           };
-          child.stdout.emit("data", JSON.stringify({ id: request.id, ok: !error, error, result }) + "\n");
-        } };
+          const reply = () => child.stdout.emit("data", JSON.stringify({ id: request.id, ok: !error, error, result }) + "\n");
+          if (holdMetadata && request.command === "run_metadata") heldMetadata.push(reply);
+          else reply();
+        } });
         launches.push({ args, child });
         return child;
       } },
@@ -54,6 +58,8 @@ function createLifecyclePanel(settings = {}) {
     setDaemonGraph(graph) { daemonGraph = graph; },
     setDaemonMetadataGraph(graph) { daemonMetadataGraph = graph; },
     setDaemonError(error) { daemonError = error; },
+    holdMetadata() { holdMetadata = true; },
+    releaseMetadata() { heldMetadata.splice(0).forEach(reply => reply()); },
     sources(files, complete = true) {
       launches.at(-1).child.stdout.emit("data", Buffer.from(JSON.stringify({ event: "sources", files, complete }) + "\n"));
     },
@@ -67,7 +73,7 @@ function createLifecyclePanel(settings = {}) {
       languageId: "onda", uri: { scheme: "file", fsPath: "/tmp/lifecycle.onda" },
     })`),
     connect() {
-      panel.evaluate("connectRunControl(1234); runPanelState.connected = true; runPanelState.running = true;");
+      panel.evaluate("connectRunControl(1234); runSchemaReady = true; runPanelState.connected = true; runPanelState.running = true;");
       return sockets.at(-1);
     },
     reply(socket, request, result, error) {

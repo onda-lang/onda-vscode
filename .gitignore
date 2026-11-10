@@ -2,3 +2,8 @@ node_modules/
 out/
 *.vsix
 .vscode-test/
+
+/ui/gpu/
+
+/compiler/
+/.onda-source/
