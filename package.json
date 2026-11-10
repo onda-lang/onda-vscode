@@ -1,8 +1,8 @@
 {
   "name": "onda-vscode",
   "displayName": "Onda",
-  "description": "VS Code support for the Onda audio DSL",
-  "version": "0.2.0",
+  "description": "VS Code extension for the Onda audio programming language",
+  "version": "0.2.1",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "Apache-2.0",
