@@ -45,8 +45,8 @@ function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings =
           inspect: (key) => ({ defaultValue: { "run.sampleRate": 48_000, "run.blockSize": 512 }[key], globalValue: settings[key], workspaceValue: workspaceSettings[key] }),
           get: (key, fallback) => ({
             "compiler.source": "external",
-            "server.path": "/custom/onda",
-            "server.args": ["--custom-option"],
+            "exec.path": "/custom/onda",
+            "exec.args": ["--custom-option"],
             ...settings,
             ...workspaceSettings,
           })[key] ?? fallback,

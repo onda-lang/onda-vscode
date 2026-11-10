@@ -53,7 +53,7 @@ async function run() {
   assert.equal(vscode.workspace.workspaceFolders.length, 2, 'Exercise multi-root settings');
   const windowConfig = vscode.workspace.getConfiguration('onda');
   const folderConfig = vscode.workspace.getConfiguration('onda', source);
-  for (const setting of ['compiler.source', 'server.path', 'server.args']) {
+  for (const setting of ['compiler.source', 'exec.path', 'exec.args']) {
     assert.deepEqual(folderConfig.get(setting), windowConfig.get(setting),
       `${setting} must use the shared window compiler even with conflicting folder settings`);
   }

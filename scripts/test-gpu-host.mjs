@@ -32,7 +32,7 @@ await writeFile(workspace, JSON.stringify({
   folders: [{ path: 'workspace' }, { path: 'secondary' }],
   settings: {
     'onda.compiler.source': binary === 'bundled' ? 'bundled' : 'external',
-    ...(binary === 'bundled' ? {} : { 'onda.server.path': resolve(binary) }),
+    ...(binary === 'bundled' ? {} : { 'onda.exec.path': resolve(binary) }),
     'onda.run.theme': 'light',
     'telemetry.telemetryLevel': 'off', 'workbench.startupEditor': 'none',
     'workbench.secondarySideBar.defaultVisibility': 'hidden', 'git.openRepositoryInParentFolders': 'never',
@@ -42,8 +42,8 @@ await writeFile(workspace, JSON.stringify({
 // services and playback choose different compilers.
 await writeFile(join(root, 'workspace', '.vscode', 'settings.json'), JSON.stringify({
   'onda.compiler.source': binary === 'bundled' ? 'external' : 'bundled',
-  'onda.server.path': join(root, 'folder-compiler-must-not-run'),
-  'onda.server.args': ['--folder-argument-must-not-run'],
+  'onda.exec.path': join(root, 'folder-compiler-must-not-run'),
+  'onda.exec.args': ['--folder-argument-must-not-run'],
 }));
 const fixture = (frequency, label = 'High-pass') => `enum Mode:\n  LowPass\n  HighPass {label = "${label}"}\nenum One:\n  Only\nparams:\n  freq = ${frequency}.0 {20.0, 20000.0}\n  mode = Mode::HighPass\n  fixed = One::Only\ninit:\n  phase = 0.0\n  previous = -1.0\nblock:\n  if freq != previous:\n    print(freq)\n    previous = freq\nsample:\n  out1 = sin(phase) * 0.00001\n  out2 = sin(phase) * 0.00001\n  phase = (phase + freq * TWO_PI / SR) % TWO_PI\n`;
 const source = join(root, 'workspace', 'host.onda');

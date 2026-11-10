@@ -26,8 +26,8 @@ for (const mode of ["playback", "metadata"]) {
     let launcher;
     const panel = createRunPanel("0.9.0", {
       settings: {
-        "compiler.source": "external", "server.path": process.execPath,
-        "server.args": [path.join(__dirname, "fixtures", "processTree.js"), String(server.address().port)],
+        "compiler.source": "external", "exec.path": process.execPath,
+        "exec.args": [path.join(__dirname, "fixtures", "processTree.js"), String(server.address().port)],
       },
       modules: { child_process: { ...childProcess, spawn(...args) {
         launcher = childProcess.spawn(...args);

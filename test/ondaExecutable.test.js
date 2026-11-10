@@ -88,7 +88,7 @@ test("compiler setting changes restart language services, while theme changes do
   `);
   await panel.evaluate("activate({ subscriptions: [], extensionPath: extensionRoot })");
   const initial = panel.evaluate("restarts");
-  for (const setting of ["onda.compiler.source", "onda.server.path", "onda.server.args"]) {
+  for (const setting of ["onda.compiler.source", "onda.exec.path", "onda.exec.args"]) {
     panel.context.changedSetting = setting;
     await panel.evaluate("configurationChanged({ affectsConfiguration: setting => setting === changedSetting })");
   }

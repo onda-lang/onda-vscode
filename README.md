@@ -2,20 +2,16 @@
   <img src="assets/png/onda-logo-dark-circle.png" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
 </h1>
 
-Language services, an embedded compiler, GPU run controls, and project creation/export
-for [Onda](https://onda-lang.org). Supports `.onda`, `.on`, and `.ondaproject` files.
+VS Code extension for the [Onda](https://onda-lang.org) audio programming language. The extension ships with the embedded
+compiler, which is used for both LSP support and compilation.
+
+Supports `.onda`, `.on`, and `.ondaproject` files.
 
 ## Install
 
-Requires VS Code 1.90 or newer. Install from the
-[Microsoft Marketplace](https://marketplace.visualstudio.com/items?itemName=onda-lang.onda-vscode)
+Install from the [Microsoft Marketplace](https://marketplace.visualstudio.com/items?itemName=onda-lang.onda-vscode)
 or [Open VSX](https://open-vsx.org/extension/onda-lang/onda-vscode), or use
 **Extensions: Install from VSIX…** for a packaged build.
-
-The compiler is included for Linux x64 and arm64, Windows x64, and macOS arm64;
-a separate Onda installation is not required. Linux packages use the Debian 12
-baseline (glibc 2.36 and PipeWire 0.3.65). The bundled macOS compiler declares
-macOS 11.0 as its minimum; the installed VS Code version may require a newer OS.
 
 ## Commands
 
@@ -32,104 +28,20 @@ macOS 11.0 as its minimum; the installed VS Code version may require a newer OS.
 
 ## Configuration
 
-| Setting | Default / effect |
+| Setting | Default |
 | --- | --- |
 | `onda.compiler.source` | `bundled`; choose `external` to use a custom compiler. |
-| `onda.server.path` | Used with `external`; unset finds `onda` on `PATH`. |
-| `onda.server.args` | Empty; arguments before each compiler subcommand. |
+| `onda.exec.path` | Used with `external`; unset finds `onda` on `PATH`. |
+| `onda.exec.args` | Empty; arguments before each compiler subcommand. |
 | `onda.run.theme` | Unset (`null`) detects VS Code's appearance when the panel opens; accepts `dark` or `light`. |
-| `onda.run.sampleRate` | 48,000 Hz for the next run. |
-| `onda.run.blockSize` | 512 frames for the next run. |
-
-The run panel's Settings changes sample rate, block size, and Fast Math immediately by
-recompiling, preserving whether playback was running or stopped. Its ◐ button cycles
-Dark / Light and saves the theme in VS Code settings. The button also appears in the unloaded view.
+| `onda.run.sampleRate` | 48,000 Hz for the next run. This can also be changed in the run window. |
+| `onda.run.blockSize` | 512 frames for the next run. This can also be changed in the run window. |
 
 To use a custom compiler:
 
 ```json
 {
   "onda.compiler.source": "external",
-  "onda.server.path": "/path/to/onda"
+  "onda.exec.path": "/path/to/onda"
 }
 ```
-
-Use an Onda build matching [onda-version](onda-version) so the compiler, control
-protocol, and UI agree. Changing compiler source/path/arguments stops playback
-and restarts the language server. The run panel's smoothing setting applies live
-and survives source reloads.
-
-One compiler serves the whole VS Code window. Set compiler source, path, and
-arguments in **User** or **Workspace** settings. In a multi-root workspace, put
-these settings in the `.code-workspace` file; individual folders cannot override
-them. The compiler source and executable path are excluded from Settings Sync.
-
-Language services watch saved source dependencies, including files outside the
-workspace, and refresh diagnostics when dependencies change or missing files appear.
-Parameter Reset restores defaults immediately, independently of smoothing.
-
-Enum parameters use labelled dropdowns in the run panel. Reloading display labels
-preserves the selected member; changing the enum type or member order resets the
-selection to the new default.
-
-## Development
-
-Build the [GPU bundle in the Onda checkout](https://github.com/onda-lang/onda/blob/main/ui/gpu/README.md#browser-build-and-staging)
-and obtain the matching extracted native release. From this repository:
-
-```sh
-npm ci
-npm run stage:compiler -- /path/to/extracted-onda-release linux-x64
-npm run stage:gpu -- /path/to/onda/ui/gpu
-npm test
-npm run package:embedded -- /path/to/extracted-onda-release linux-x64 onda.vsix
-```
-
-Use `linux-arm64`, `win32-x64`, or `darwin-arm64` on those hosts; staging executes
-the compiler to verify its version and requires a matching host architecture.
-Both staged bundles must match `onda-version`. Extension builds copy the generated
-UI into `out/gpu`. VSIX packaging bundles the extension and its JavaScript
-dependencies into one file, retaining dependency notices and the language client's
-process-cleanup script. Development builds retain individual modules and source maps.
-
-After staging, `npm run watch` builds the extension and keeps TypeScript and GPU
-assets updated, including when `stage:gpu` replaces the staged bundle. Reload the
-extension development window to use a newly staged UI.
-
-For a real extension-host/playback check, with VS Code available as `code` or
-selected by `VSCODE_BIN`:
-
-```sh
-npm run test:gpu-host -- bundled
-```
-
-Pass a VSIX path as the second argument to test its installed contents. The test
-uses a temporary profile and checks playback, parameter edits, panel visibility,
-and source reload. Host failures save their error and language diagnostics in
-`host-failure.json` in the reported artifact directory.
-`npm run test:compiler` separately checks the bundled CLI/LSP
-without relying on an Onda installation on `PATH`.
-
-`npm run test:integration` exercises the extension with real LSP, daemon, and playback
-processes, including dependency recovery, exact integer controls, event payloads,
-pending buffer edits across reloads, cancellation, and subprocess cleanup.
-It uses the staged compiler by default and requires an
-audio output device. Select a local compiler with
-`npm run test:integration -- /path/to/onda`. Check packaged extension code with
-`npm run test:gpu-host -- bundled /path/to/package.vsix`.
-
-For development builds sharing a version number, restage the compiler after
-rebuilding Onda. The compiler smoke test prints its executable checksum and checks
-the current language features; matching version text alone does not identify a build.
-
-Unpublished integration builds can pass `onda_run_id` and the exact
-`onda_source_ref` to the reusable packaging workflow. It downloads the completed
-SDK artifacts, verifies their source and checksums, and builds the GPU UI from
-that same Onda commit. Omitting the run ID keeps the combined integration build's
-shared GPU UI and SDK artifacts.
-
-## License
-
-Starting with the Onda 0.9.0 release, Onda-authored code in this repository is licensed
-under the [Apache License, Version 2.0](LICENSE). Third-party components retain their
-respective licenses.

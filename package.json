@@ -175,13 +175,13 @@
     "configuration": {
       "title": "Onda",
       "properties": {
-        "onda.server.path": {
+        "onda.exec.path": {
           "type": "string",
           "scope": "window",
           "ignoreSync": true,
           "description": "Path to the external Onda executable for this VS Code window when onda.compiler.source is external. Set in User or Workspace settings; folder overrides are unsupported. Leave unset to use 'onda' from PATH."
         },
-        "onda.server.args": {
+        "onda.exec.args": {
           "type": "array",
           "scope": "window",
           "default": [],
@@ -221,7 +221,7 @@
           ],
           "enumDescriptions": [
             "Use the Onda compiler included with this extension.",
-            "Use onda.server.path when configured, otherwise find onda on PATH."
+            "Use onda.exec.path when configured, otherwise find onda on PATH."
           ],
           "default": "bundled",
           "scope": "window",

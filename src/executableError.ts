@@ -29,7 +29,7 @@ export function describeOndaExecutableError(
     return {
       message:
         `Onda executable '${command}' was not found. `
-        + "Install Onda and add it to PATH, or set 'onda.server.path' to the executable's full path.",
+        + "Install Onda and add it to PATH, or set 'onda.exec.path' to the executable's full path.",
       canConfigure: true,
     };
   }
@@ -40,7 +40,7 @@ export function describeOndaExecutableError(
         `Onda executable '${command}' could not be run because permission was denied. `
         + (source === "bundled"
           ? "Reinstall the Onda extension for this platform, or select 'external' in 'onda.compiler.source'."
-          : "Check that the file is executable and that 'onda.server.path' points to the correct file."),
+          : "Check that the file is executable and that 'onda.exec.path' points to the correct file."),
       canConfigure: true,
     };
   }

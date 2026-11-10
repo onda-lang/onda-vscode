@@ -252,7 +252,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (event.affectsConfiguration("onda.run.theme")) postRunPanelState();
     if (event.affectsConfiguration("onda.run.sampleRate")) delete runAudioOverrides.sampleRateHz;
     if (event.affectsConfiguration("onda.run.blockSize")) delete runAudioOverrides.blockFrames;
-    if (["onda.compiler.source", "onda.server.path", "onda.server.args"]
+    if (["onda.compiler.source", "onda.exec.path", "onda.exec.args"]
       .some((setting) => event.affectsConfiguration(setting))) {
       await restartClient();
     }
@@ -852,9 +852,9 @@ function ondaExecutableConfig(): { command: string; extraArgs: string[]; source:
     command: resolveOndaExecutable(
       extensionContext?.extensionPath ?? path.resolve(__dirname, ".."),
       source,
-      config.get<string>("server.path"),
+      config.get<string>("exec.path"),
     ),
-    extraArgs: config.get<string[]>("server.args", []),
+    extraArgs: config.get<string[]>("exec.args", []),
     source,
   };
 }
@@ -878,7 +878,7 @@ async function showOndaCommandError(
   if (action === CONFIGURE_EXECUTABLE_ACTION) {
     await vscode.commands.executeCommand(
       "workbench.action.openSettings",
-      source === "bundled" ? "onda.compiler.source" : "onda.server.path",
+      source === "bundled" ? "onda.compiler.source" : "onda.exec.path",
     );
   }
 }

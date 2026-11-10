@@ -2,6 +2,15 @@ name: Package embedded compiler
 
 on:
   workflow_dispatch:
+    inputs:
+      onda_run_id:
+        description: Onda SDK build run ID; leave both Onda inputs empty to use the pinned release
+        type: string
+        default: ''
+      onda_source_ref:
+        description: Exact full Onda source commit of that SDK run
+        type: string
+        default: ''
   workflow_call:
     inputs:
       source_ref:
@@ -9,11 +18,11 @@ on:
         required: true
         type: string
       onda_source_ref:
-        description: Onda commit supplying compiler and GPU UI artifacts in the calling run
-        required: true
+        description: Exact full Onda source commit of the SDK run
         type: string
+        default: ''
       onda_run_id:
-        description: Existing Onda SDK build run; empty uses the calling run
+        description: Onda SDK build run ID; empty uses the pinned release
         type: string
         default: ''
 
@@ -33,13 +42,11 @@ jobs:
           ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
           ONDA_RUN_ID: ${{ inputs.onda_run_id }}
         run: |
-          if [[ -n "$ONDA_SOURCE_REF" && ! "$ONDA_SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
-            echo 'Expected a full Onda source commit' >&2
-            exit 1
-          fi
-          if [[ -n "$ONDA_RUN_ID" && ( ! "$ONDA_RUN_ID" =~ ^[1-9][0-9]*$ || -z "$ONDA_SOURCE_REF" ) ]]; then
-            echo 'An existing SDK run requires its exact Onda source commit' >&2
-            exit 1
+          if [[ -n "$ONDA_RUN_ID" || -n "$ONDA_SOURCE_REF" ]]; then
+            if [[ ! "$ONDA_RUN_ID" =~ ^[1-9][0-9]*$ || ! "$ONDA_SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'An unpublished SDK requires both a build run ID and its full Onda source commit' >&2
+              exit 1
+            fi
           fi
       - uses: actions/checkout@v5
         with:
@@ -55,28 +62,13 @@ jobs:
         run: |
           echo "version=$(node ./scripts/onda-version.mjs)" >> "$GITHUB_OUTPUT"
           echo "matrix=$(node ./scripts/compiler-bundle.mjs)" >> "$GITHUB_OUTPUT"
-      - name: Download unpublished shared GPU UI
-        if: inputs.onda_source_ref != '' && inputs.onda_run_id == ''
-        uses: actions/download-artifact@v7
-        with:
-          name: onda-gpu-ui
-          path: ${{ runner.temp }}/gpu-ui
-      - name: Verify and stage unpublished GPU UI
-        if: inputs.onda_source_ref != '' && inputs.onda_run_id == ''
-        env:
-          ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
-        run: |
-          test "$(cat "$RUNNER_TEMP/gpu-ui/onda-source.txt")" = "$ONDA_SOURCE_REF"
-          node ./scripts/stage-gpu-ui.mjs "$RUNNER_TEMP/gpu-ui"
       - name: Check out matching Onda UI source
-        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         uses: actions/checkout@v5
         with:
           repository: onda-lang/onda
           ref: ${{ inputs.onda_source_ref || format('refs/tags/{0}', steps.version.outputs.version) }}
           path: .onda-source
       - name: Verify Onda UI source
-        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         env:
           ONDA_VERSION: ${{ steps.version.outputs.version }}
           ONDA_SOURCE_REF: ${{ inputs.onda_source_ref }}
@@ -89,18 +81,15 @@ jobs:
             exit 1
           fi
       - uses: dtolnay/rust-toolchain@1.98.0
-        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         with:
           targets: wasm32-unknown-unknown
       - name: Build shared GPU UI
-        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         working-directory: .onda-source
         run: |
           npm ci
           cargo install wasm-pack --version 0.15.0 --locked
           npm run build:gpu-ui
       - name: Stage matching GPU UI
-        if: inputs.onda_source_ref == '' || inputs.onda_run_id != ''
         run: node ./scripts/stage-gpu-ui.mjs .onda-source/ui/gpu
       - run: npm test
       - uses: actions/upload-artifact@v6
@@ -153,8 +142,8 @@ jobs:
           name: onda-${{ matrix.release }}
           path: ${{ runner.temp }}/onda-sdk
           repository: onda-lang/onda
-          run-id: ${{ inputs.onda_run_id || github.run_id }}
-          github-token: ${{ inputs.onda_run_id && github.token || '' }}
+          run-id: ${{ inputs.onda_run_id }}
+          github-token: ${{ github.token }}
       - name: Select and verify Onda compiler archive
         id: compiler
         shell: bash

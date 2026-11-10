@@ -49,7 +49,6 @@ jobs:
     uses: ./.github/workflows/package-embedded.yml
     with:
       source_ref: ${{ github.sha }}
-      onda_source_ref: ""
 
   marketplace:
     name: Publish to VS Code Marketplace

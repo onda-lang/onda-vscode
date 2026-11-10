@@ -21,8 +21,8 @@ const version = childProcess.spawnSync(command, ['--version'], {encoding:'utf8'}
 assert.equal(version.status, 0, version.stderr);
 assert.equal(version.stdout.trim(), `Onda ${compilerVersion}`);
 console.log(`Integration compiler: ${command} (${version.stdout.trim()}${manifest ? `, ${manifest.sha256}` : ''})`);
-const settings = bundled ? {'compiler.source':'bundled','server.args':[]}
-  : {'compiler.source':'external','server.path':command,'server.args':[]};
+const settings = bundled ? {'compiler.source':'bundled','exec.args':[]}
+  : {'compiler.source':'external','exec.path':command,'exec.args':[]};
 const workspace = await realpath(await mkdtemp(join(tmpdir(), 'onda-run-integration-')));
 const source = join(workspace, 'café.onda');
 const text = `enum Mode:
