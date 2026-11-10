@@ -7,6 +7,9 @@ compiler, which is used for both LSP support and compilation.
 
 Supports `.onda`, `.on`, and `.ondaproject` files.
 
+Language services track dependencies from unsaved editor contents, including changes in
+imported files. External dependency edits refresh diagnostics without saving the entry.
+
 ## Install
 
 Install from the [Microsoft Marketplace](https://marketplace.visualstudio.com/items?itemName=onda-lang.onda-vscode)

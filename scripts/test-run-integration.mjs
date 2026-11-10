@@ -61,8 +61,8 @@ sample:
 `;
 await writeFile(source, text);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(check, description) {
-  const deadline = Date.now() + 15000;
+async function until(check, description, timeout = 15000) {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (await check()) return;
     await delay(10);
@@ -76,37 +76,45 @@ async function dispose(panel) {
   await panel.evaluate('stopFile({silent:true});disposeRunFileWatcher()');
 }
 
+async function languageServer(t) {
+  const child = childProcess.spawn(command, ['lsp'], {stdio:'pipe'});
+  t.after(() => child.kill());
+  let buffer = Buffer.alloc(0);
+  let parseError;
+  const messages = [];
+  child.stdout.on('data', chunk => {
+    buffer = Buffer.concat([buffer, chunk]);
+    try {
+      for (;;) {
+        const end = buffer.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        const length = Number(/content-length:\s*(\d+)/i.exec(buffer.toString('ascii', 0, end))[1]);
+        if (buffer.length < end + 4 + length) return;
+        messages.push(JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString()));
+        buffer = buffer.subarray(end + 4 + length);
+      }
+    } catch (error) { parseError = error; }
+  });
+  t.after(() => assert.ifError(parseError));
+  const send = message => {
+    const body = JSON.stringify({jsonrpc:'2.0', ...message});
+    child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  };
+  send({id:1, method:'initialize', params:{processId:process.pid, rootUri:null, capabilities:{}}});
+  await until(() => messages.some(message => message.id === 1), 'LSP initialization');
+  send({method:'initialized', params:{}});
+  const diagnostics = uri => messages.filter(message => message.method === 'textDocument/publishDiagnostics'
+    && message.params.uri === uri);
+  return {child, messages, send, diagnostics};
+}
+
 try {
   await test('LSP recovers when a missing include is created before dependency discovery finishes', {timeout:30000}, async t => {
     const entry = join(workspace, 'language.onda');
     const dependency = join(workspace, 'new', 'nested', 'created.on');
     const text = 'include "new/nested/created.on"\nsample:\n  out1 = dependency(0.0)\n';
     await writeFile(entry, text);
-    const child = childProcess.spawn(command, ['lsp'], {stdio:'pipe'});
-    t.after(() => child.kill());
-    let buffer = Buffer.alloc(0);
-    let parseError;
-    const messages = [];
-    child.stdout.on('data', chunk => {
-      buffer = Buffer.concat([buffer, chunk]);
-      try {
-        for (;;) {
-          const end = buffer.indexOf('\r\n\r\n');
-          if (end < 0) return;
-          const length = Number(/content-length:\s*(\d+)/i.exec(buffer.toString('ascii', 0, end))[1]);
-          if (buffer.length < end + 4 + length) return;
-          messages.push(JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString()));
-          buffer = buffer.subarray(end + 4 + length);
-        }
-      } catch (error) { parseError = error; }
-    });
-    const send = message => {
-      const body = JSON.stringify({jsonrpc:'2.0', ...message});
-      child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
-    };
-    send({id:1, method:'initialize', params:{processId:process.pid, rootUri:null, capabilities:{}}});
-    await until(() => messages.some(message => message.id === 1), 'LSP initialization');
-    send({method:'initialized', params:{}});
+    const {child, messages, send} = await languageServer(t);
     const uri = pathToFileURL(entry).href;
     send({method:'textDocument/didOpen', params:{textDocument:{uri, languageId:'onda', version:1, text}}});
     const diagnostics = () => messages.filter(message => message.method === 'textDocument/publishDiagnostics'
@@ -137,7 +145,6 @@ try {
     await discovering;
     await until(() => diagnostics()?.length === 0, 'diagnostic recovery after discovery');
     assert.equal(discoveries, 1, 'Revalidation must not start a discovery loop');
-    assert.ifError(parseError);
     send({id:2, method:'shutdown', params:null});
     await until(() => messages.some(message => message.id === 2), 'LSP shutdown');
     const closed = once(child, 'close');
@@ -146,6 +153,73 @@ try {
     const [code] = await closed;
     assert.equal(code, 0);
   });
+
+  for (const nested of [false, true]) {
+    await test(`LSP watches dependencies introduced by unsaved ${nested ? 'imported' : 'entry'} edits`, {timeout:15000}, async t => {
+      const entry = join(workspace, `overlay-${nested}.onda`);
+      const parent = join(workspace, `parent-${nested}.on`);
+      const dependency = join(workspace, `dependency-${nested}.on`);
+      const saved = nested
+        ? `include "parent-${nested}.on"\nsample:\n  out1 = identity(0.0)\n`
+        : 'sample:\n  out1 = 0.0\n';
+      await writeFile(entry, saved);
+      await writeFile(parent, 'def identity(x):\n  return x\n');
+      await writeFile(dependency, 'def imported_value(x):\n  return x\n');
+      const server = await languageServer(t);
+      let middleware;
+      const notifications = [];
+      const panel = createRunPanel('0.9.0', panelOptions({'vscode-languageclient/node': {
+        TransportKind: {stdio:0},
+        LanguageClient: class {
+          constructor(_id, _name, _options, clientOptions) { middleware = clientOptions.middleware; }
+          async start() {}
+          async stop() {}
+          async sendNotification(method, params) {
+            if (method === 'workspace/didChangeWatchedFiles') notifications.push(...params.changes);
+            server.send({method, params});
+          }
+        },
+      }}));
+      t.after(() => panel.evaluate('deactivate()'));
+      const document = (file, text) => ({
+        uri: {scheme:'file', fsPath:file}, languageId:'onda', version:1,
+        text, getText() { return this.text; },
+      });
+      const entryDocument = document(entry, saved);
+      const edited = nested ? document(parent, 'def identity(x):\n  return x\n') : entryDocument;
+      const documents = nested ? [entryDocument, edited] : [entryDocument];
+      panel.context.languageDocuments = documents;
+      panel.context.fileUri = file => pathToFileURL(file).href;
+      panel.evaluate(`vscode.workspace.textDocuments = languageDocuments;
+        vscode.Uri.file = file => ({scheme:'file', fsPath:file, toString:() => fileUri(file)});`);
+      await panel.evaluate('startClient()');
+      for (const doc of documents) {
+        await middleware.didOpen(doc, async doc => server.send({method:'textDocument/didOpen', params:{
+          textDocument:{uri:pathToFileURL(doc.uri.fsPath).href, languageId:'onda', version:doc.version, text:doc.getText()},
+        }}));
+      }
+      const uri = pathToFileURL(entry).href;
+      await until(() => server.diagnostics(uri).length > 0, 'initial diagnostics');
+      edited.text = `include "dependency-${nested}.on"\n` + (nested
+        ? 'def identity(x):\n  return imported_value(x)\n'
+        : 'sample:\n  out1 = imported_value(0.0)\n');
+      edited.version++;
+      const before = server.diagnostics(uri).length;
+      const event = {document:edited, contentChanges:[{text:edited.text}]};
+      const next = async event => server.send({method:'textDocument/didChange', params:{
+        textDocument:{uri:pathToFileURL(event.document.uri.fsPath).href, version:edited.version},
+        contentChanges:event.contentChanges,
+      }});
+      await (middleware.didChange ? middleware.didChange(event, next) : next(event));
+      await until(() => server.diagnostics(uri).length > before, 'unsaved edit diagnostics');
+      assert.deepEqual(server.diagnostics(uri).at(-1).params.diagnostics, []);
+      await writeFile(dependency, 'def imported_value(x):\n  return missing_overlay_symbol\n');
+      await until(() => notifications.some(change => change.uri === pathToFileURL(dependency).href),
+        'external dependency notification', 3000);
+      await until(() => server.diagnostics(uri).at(-1)?.params.diagnostics.some(
+        item => item.message.includes('missing_overlay_symbol')), 'external dependency diagnostics', 3000);
+    });
+  }
 
   await test('MIDI commands cannot cross a real playback engine replacement', {timeout:30000}, async t => {
     const file = join(workspace, 'midi-generation.onda');

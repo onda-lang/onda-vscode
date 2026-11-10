@@ -6,11 +6,13 @@ interface Entry {
   pending?: AbortController;
 }
 
-/** Owns disk dependency discovery and watching for the current language server. */
+/** Watches source graphs resolved from the current language-server documents. */
 export class LanguageDependencies {
   private readonly entries = new Map<string, Entry>();
   private readonly watcher: RunFileWatcher;
   private discovery: Promise<void> = Promise.resolve();
+  private readonly queued = new Set<string>();
+  private timer: NodeJS.Timeout | undefined;
   private disposed = false;
 
   constructor(
@@ -20,21 +22,41 @@ export class LanguageDependencies {
   ) {
     this.watcher = new RunFileWatcher((files) => {
       changed(files);
-      for (const [file, entry] of this.entries) {
-        if (files.some(changed => entry.files.has(changed))) void this.open(file);
-      }
+      for (const file of files) this.change(file);
     }, undefined, reportError);
   }
 
-  open(file: string): Promise<void> {
-    if (this.disposed) return Promise.resolve();
+  async open(file: string): Promise<void> {
+    if (this.disposed) return;
     file = normalizeRunPath(file);
-    let entry = this.entries.get(file);
-    if (!entry) {
-      entry = { files: new Set([file]) };
-      this.entries.set(file, entry);
+    if (!this.entries.has(file)) {
+      this.entries.set(file, { files: new Set([file]) });
       this.updateWatches();
     }
+    await Promise.all(this.affected(file).map(([path, entry]) => this.refresh(path, entry)));
+  }
+
+  change(file: string): void {
+    if (this.disposed) return;
+    for (const [path, entry] of this.affected(normalizeRunPath(file))) {
+      entry.pending?.abort();
+      this.queued.add(path);
+    }
+    if (this.queued.size === 0) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      const files = [...this.queued];
+      this.queued.clear();
+      for (const file of files) {
+        const entry = this.entries.get(file);
+        if (entry) void this.refresh(file, entry);
+      }
+    }, 100);
+  }
+
+  private refresh(file: string, entry: Entry): Promise<void> {
+    this.queued.delete(file);
     entry.pending?.abort();
     const pending = new AbortController();
     entry.pending = pending;
@@ -65,11 +87,15 @@ export class LanguageDependencies {
     file = normalizeRunPath(file);
     this.entries.get(file)?.pending?.abort();
     this.entries.delete(file);
+    this.queued.delete(file);
     this.updateWatches();
+    this.change(file);
   }
 
   dispose(): void {
     this.disposed = true;
+    clearTimeout(this.timer);
+    this.queued.clear();
     for (const entry of this.entries.values()) entry.pending?.abort();
     this.entries.clear();
     this.watcher.dispose();
@@ -77,5 +103,9 @@ export class LanguageDependencies {
 
   private updateWatches(): void {
     this.watcher.update([...this.entries.values()].flatMap(entry => [...entry.files]));
+  }
+
+  private affected(file: string): [string, Entry][] {
+    return [...this.entries].filter(([, entry]) => entry.files.has(file));
   }
 }

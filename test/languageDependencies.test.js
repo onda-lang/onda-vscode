@@ -109,3 +109,56 @@ test("closing or disposing rejects stale graphs and cancels pending frontend wor
   await delay(200);
   assert.deepEqual(changes, []);
 });
+
+test("editor changes refresh affected importers once and closing an overlay refreshes them again", async t => {
+  const { root, entry, dependency } = fixture(t);
+  const other = path.join(root, "other.onda");
+  fs.writeFileSync(other, "unrelated\n");
+  const queries = [];
+  const watcher = new LanguageDependencies(async file => {
+    queries.push(file);
+    return { files: file === entry ? [entry, dependency] : [file], complete: true };
+  }, () => {}, assert.fail);
+  t.after(() => watcher.dispose());
+  await watcher.open(entry);
+  await watcher.open(dependency);
+  await watcher.open(other);
+  queries.length = 0;
+  for (let i = 0; i < 5; i++) watcher.change(dependency);
+  await until(() => queries.length >= 2);
+  assert.deepEqual(queries.sort(), [entry, dependency].sort());
+  queries.length = 0;
+  watcher.close(dependency);
+  await until(() => queries.length > 0);
+  assert.deepEqual(queries, [entry]);
+  watcher.change(entry);
+  watcher.dispose();
+  await delay(200);
+  assert.deepEqual(queries, [entry]);
+});
+
+test("an editor change rejects an in-flight graph before the replacement discovery starts", async t => {
+  const { entry, dependency } = fixture(t);
+  let finish;
+  let signal;
+  let queries = 0;
+  const changes = [];
+  const watcher = new LanguageDependencies((_file, pending) => {
+    if (++queries > 1) return Promise.resolve({ files: [entry], complete: true });
+    signal = pending;
+    return new Promise(resolve => { finish = resolve; });
+  }, files => changes.push(...files), assert.fail);
+  t.after(() => watcher.dispose());
+  const loading = watcher.open(entry);
+  await until(() => finish);
+  watcher.change(entry);
+  assert.equal(signal.aborted, true);
+  finish({ files: [entry, dependency], complete: true });
+  await loading;
+  assert.deepEqual(changes, []);
+  await until(() => queries === 2 && changes.includes(entry));
+  changes.length = 0;
+  fs.writeFileSync(dependency, "stale dependency\n");
+  await delay(200);
+  assert.deepEqual(changes, []);
+});

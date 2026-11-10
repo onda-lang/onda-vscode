@@ -1265,6 +1265,16 @@ async function loadStoppedRunMetadata(
 
 type DaemonRequest = (command: string, payload?: Record<string, unknown>) => Promise<any>;
 
+async function discoverLanguageSources(file: string, signal: AbortSignal): Promise<unknown> {
+  return withOndaDaemon(file, signal, async request => {
+    const documents = vscode.workspace.textDocuments
+      .filter(document => document.uri.scheme === "file" && document.languageId === "onda")
+      .map(document => ({path: document.uri.fsPath, version: document.version, text: document.getText()}));
+    for (const document of documents) await request("open", document);
+    return request("run_sources", {path: file});
+  });
+}
+
 /** Share the daemon framing and process cleanup between playback metadata and LSP discovery. */
 async function withOndaDaemon<T>(
   fsPath: string,
@@ -2665,7 +2675,7 @@ async function startClient(): Promise<void> {
   };
 
   const dependencies = new LanguageDependencies(
-    (file, signal) => withOndaDaemon(file, signal, request => request("run_sources", { path: file })),
+    discoverLanguageSources,
     (files) => {
       void activeClient.sendNotification("workspace/didChangeWatchedFiles", {
         changes: files.map(file => ({ uri: vscode.Uri.file(file).toString(), type: 2 })),
@@ -2683,6 +2693,10 @@ async function startClient(): Promise<void> {
       didSave: async (document, next) => {
         await next(document);
         void dependencies.open(document.uri.fsPath);
+      },
+      didChange: async (event, next) => {
+        await next(event);
+        dependencies.change(event.document.uri.fsPath);
       },
       didClose: async (document, next) => {
         dependencies.close(document.uri.fsPath);
