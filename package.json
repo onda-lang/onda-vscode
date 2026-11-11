@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code extension for the Onda audio programming language",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "Apache-2.0",
@@ -114,11 +114,11 @@
       },
       {
         "command": "onda.createProject",
-        "title": "Onda: Create Project\u2026"
+        "title": "Onda: Create Project…"
       },
       {
         "command": "onda.saveAsProject",
-        "title": "Onda: Save as Project\u2026",
+        "title": "Onda: Save as Project…",
         "icon": "$(save-as)"
       },
       {
@@ -191,13 +191,20 @@
           "description": "Additional arguments passed to the selected Onda compiler before each built-in subcommand. Applies to the whole VS Code window."
         },
         "onda.run.theme": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "enum": [
             null,
             "dark",
             "light"
           ],
-          "enumItemLabels": ["Detect at startup", "Dark", "Light"],
+          "enumItemLabels": [
+            "Detect at startup",
+            "Dark",
+            "Light"
+          ],
           "default": null,
           "description": "Theme used by the Onda run panel. When unset, detect the VS Code appearance when the panel opens."
         },
