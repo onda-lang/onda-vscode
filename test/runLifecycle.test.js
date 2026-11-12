@@ -925,6 +925,52 @@ test("explicit Run commands still focus the run view, including an existing proc
   assert.equal(panel.panelReveals[0].preserveFocus, false);
 });
 
+for (const existingProcess of [false, true]) {
+  test(`Play from the run panel preserves keyboard focus (existing process: ${existingProcess})`, async () => {
+    const panel = createLifecyclePanel();
+    await panel.start();
+    if (existingProcess) {
+      const socket = panel.connect();
+      const pausing = panel.receive({ type: "stop" });
+      panel.reply(socket, socket.requests.at(-1), {});
+      await pausing;
+    } else {
+      await panel.evaluate("stopFile({silent:true})");
+    }
+    panel.panelReveals.length = 0;
+    const starting = panel.receive({ type: "start" });
+    if (existingProcess) {
+      await new Promise(resolve => setImmediate(resolve));
+      const socket = panel.sockets.at(-1);
+      assert.equal(socket.requests.at(-1).command, "play");
+      panel.reply(socket, socket.requests.at(-1), {});
+    }
+    await starting;
+    assert.equal(panel.panelReveals.length, 1);
+    assert.equal(panel.panelReveals[0].preserveFocus, true);
+  });
+}
+
+for (const message of [
+  { type: "setInputDevice", name: "Microphone" },
+  { type: "setOutputDevice", name: "Headphones" },
+  { type: "setMidiInputDevice", name: "MIDI Controller" },
+  { type: "setFastMath", enabled: true },
+  { type: "setRunSettings", sampleRateHz: 96000, blockSamples: 512 },
+  { type: "setRunSettings", sampleRateHz: 48000, blockSamples: 1024 },
+]) {
+  test(`${JSON.stringify(message)} preserves keyboard focus when restarting playback`, async () => {
+    const panel = createLifecyclePanel();
+    await panel.start();
+    panel.connect();
+    panel.panelReveals.length = 0;
+    await panel.receive(message);
+    assert.equal(panel.launches.length, 2);
+    assert.equal(panel.panelReveals.length, 1);
+    assert.equal(panel.panelReveals[0].preserveFocus, true);
+  });
+}
+
 test("creating a run panel for a background reload preserves focus", () => {
   const panel = createLifecyclePanel();
   panel.evaluate("runPanel = undefined; ensureRunPanel(true)");

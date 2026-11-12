@@ -2215,7 +2215,11 @@ async function updateRunDeviceSelection(
   if (!runPanelState.running || !runPanelState.path) {
     return;
   }
-  await runFile(runPanelState.path, { restart: true, fastMath: runPanelState.fastMath });
+  await runFile(runPanelState.path, {
+    restart: true,
+    fastMath: runPanelState.fastMath,
+    preserveFocus: true,
+  });
 }
 
 async function refreshRunDevices(): Promise<void> {
@@ -2383,7 +2387,11 @@ function ensureRunPanel(preserveFocus = false): void {
         }
         break;
       case "start":
-        await runFile(payload.path ?? runPanelState.path, { fastMath: runPanelState.fastMath });
+        // Revealing an already focused webview can move focus off its canvas.
+        await runFile(payload.path ?? runPanelState.path, {
+          fastMath: runPanelState.fastMath,
+          preserveFocus: true,
+        });
         break;
       case "stop":
         await pauseRunProcessing();

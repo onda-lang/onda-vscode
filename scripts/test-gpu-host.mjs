@@ -190,7 +190,15 @@ try {
     const input = CanvasUi.prototype.input;
     CanvasUi.prototype.input = function(json) { const result = input.call(this, json); probe.inputs.push({event:JSON.parse(json), editing:this.editing()}); return result; };
     const commands = CanvasUi.prototype.commands;
-    CanvasUi.prototype.commands = function() { const json = commands.call(this); probe.commands.push(...JSON.parse(json)); return json; };
+    CanvasUi.prototype.commands = function() {
+      let json = commands.call(this);
+      if (probe.nextCommand) {
+        json = JSON.stringify([...JSON.parse(json), probe.nextCommand]);
+        probe.nextCommand = undefined;
+      }
+      probe.commands.push(...JSON.parse(json));
+      return json;
+    };
     const textEdit = CanvasUi.prototype.text_edit;
     CanvasUi.prototype.text_edit = function() { const json = textEdit.call(this); probe.edit = JSON.parse(json); return json; };
   })()`);
@@ -203,6 +211,37 @@ try {
   assert.ok(await page.canvas(`probe.messages.some(m => m.state?.params?.some(p =>
     p.name === 'fixed' && p.stepCount === 0 && p.enumeration?.members.length === 1))`), 'Singleton enums must remain published');
   await until(() => page.canvas('probe.packets >= 3'), 'scope pinned by default');
+  const transportShortcut = async (key, code, windowsVirtualKeyCode, command, running) => {
+    const before = await page.canvas(`probe.commands.filter(c=>c.type===${JSON.stringify(command)}).length`);
+    for (const type of ['keyDown', 'keyUp'])
+      await page.call('Input.dispatchKeyEvent', {type,key,code,windowsVirtualKeyCode,modifiers:2});
+    await until(() => page.canvas(`probe.commands.filter(c=>c.type===${JSON.stringify(command)}).length>${before}`),
+      `${command} shortcut with focus on ${await page.canvas('document.activeElement.tagName')}`, 3000);
+    await until(() => page.canvas(`probe.messages.findLast(m=>m.type==='state' && m.state?.running!==undefined)?.state.running===${running}`),
+      `${command} playback state`);
+  };
+  await page.canvas('document.querySelector("canvas").focus()');
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await transportShortcut('.', 'Period', 190, 'stop', false);
+    await transportShortcut('Enter', 'Enter', 13, 'start', true);
+  }
+  await transportShortcut('.', 'Period', 190, 'stop', false);
+  await transportShortcut('Enter', 'Enter', 13, 'start', true);
+  // Send device selections through the host bridge using hardware-independent defaults.
+  for (const command of [
+    {type:'setInputDevice',name:null},
+    {type:'setOutputDevice',name:null},
+    {type:'setMidiInputDevice',name:'Computer Keyboard'},
+  ]) {
+    const before = await page.canvas('probe.messages.length');
+    await page.canvas(`probe.nextCommand=${JSON.stringify(command)};
+      document.querySelector('canvas').dispatchEvent(new KeyboardEvent('keydown',
+        {key:'Escape',bubbles:true,cancelable:true}))`);
+    await until(() => page.canvas(`probe.messages.slice(${before}).some(m=>m.state?.running===true)`),
+      `${command.type} restarted playback`);
+    await transportShortcut('.', 'Period', 190, 'stop', false);
+    await transportShortcut('Enter', 'Enter', 13, 'start', true);
+  }
   const clickScopeHeader = async () => {
     const point = await page.evaluate(`(() => {
       const frame=document.querySelector('iframe'), outer=frame.getBoundingClientRect();
@@ -286,7 +325,7 @@ try {
   const language = JSON.parse(await readFile(join(root, 'language-result.json'), 'utf8'));
   assert.equal(language.passed, true, 'External dependency diagnostics must pass in the real extension host');
   await writeFile(join(root, 'result.json'), JSON.stringify({ passed: true, scope, language, extension: developmentPath, vsix: vsix ? resolve(vsix) : null,
-    checks: ['real extension host', 'multi-root window compiler selection', 'real playback', 'enum choices and singleton metadata', 'enum label reload', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'binary theme choices independent of workbench appearance', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
+    checks: ['real extension host', 'multi-root window compiler selection', 'real playback', 'repeated Play/Stop keyboard shortcuts preserve focus', 'device selectors preserve keyboard focus', 'enum choices and singleton metadata', 'enum label reload', 'resize retains previous frame', 'scope pinned by default', 'meter-only transport', 'expanded scope', 'numeric editor alignment', 'native text entry reaching audio processor', 'MIDI selection capability', 'binary theme choices independent of workbench appearance', 'hidden panel', 'show panel', 'source reload'] }, null, 2));
   await host('done');
   page.socket.close();
   const [code] = await ended;
