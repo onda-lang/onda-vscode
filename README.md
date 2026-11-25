@@ -53,7 +53,7 @@ To format Onda sources on save, add this language override to VS Code settings:
 }
 ```
 
-To use a custom Onda 0.9.3 or newer compiler:
+To use a custom compiler:
 
 ```json
 {
