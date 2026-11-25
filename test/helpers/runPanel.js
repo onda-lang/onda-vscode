@@ -38,6 +38,7 @@ function createRunPanel(version = "0.8.20", { settings = {}, workspaceSettings =
     require(name) {
       if (name in modules) return modules[name];
       if (name === "vscode") return {
+        languages: { registerDocumentFormattingEditProvider: () => ({ dispose() {} }) },
         ConfigurationTarget: { Global: 1, Workspace: 2 },
         ViewColumn: { Beside: 2 },
         Uri: { file: (file) => ({ scheme: "file", fsPath: file, toString: () => file }) },

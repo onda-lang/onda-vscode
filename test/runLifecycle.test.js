@@ -181,11 +181,14 @@ for (const paused of [false, true]) {
     assert.equal(panel.state().processingRequested, !paused);
     const plays = panel.launches.filter(({ args }) => args.includes("play"));
     assert.equal(plays.length, paused ? 1 : 2);
-    if (paused) assert.equal(panel.daemonRequests.at(-2).fast_math, true);
+    if (paused) assert.equal(panel.daemonRequests.at(-2).math, "fast");
     else assert.equal(plays.at(-1).args.includes("--fast-math"), true);
     const count = panel.launches.length;
     for (const enabled of [true, "false", null]) await panel.receive({ type: "setFastMath", enabled });
     assert.equal(panel.launches.length, count);
+    await panel.receive({ type: "setFastMath", enabled: false });
+    if (paused) assert.equal(panel.daemonRequests.at(-2).math, "default");
+    else assert.equal(panel.launches.at(-1).args.includes("--fast-math"), false);
   });
 
   test(`panel audio settings recompile ${paused ? "paused" : "playing"} runs without changing transport intent`, async () => {
@@ -327,7 +330,7 @@ test("saving a paused run refreshes metadata without resuming and keeps compile 
   assert.deepEqual(panel.daemonRequests.map(({ command }) => command), ["run_sources", "initialize", "run_metadata"]);
   assert.equal(panel.daemonRequests[1].sample_rate_hz, 96000);
   assert.equal(panel.daemonRequests[1].block_samples, 1024);
-  assert.equal(panel.daemonRequests[1].fast_math, true);
+  assert.equal(panel.daemonRequests[1].math, "fast");
   assert.equal(panel.daemonRequests[1].param_smoothing_seconds, 0.03);
 });
 

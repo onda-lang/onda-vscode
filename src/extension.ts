@@ -30,6 +30,7 @@ import {
   RunProcessConfiguration,
   sameRunProcessConfiguration,
 } from "./runConfiguration";
+import { formatSource } from "./formatSource";
 import { describeOndaExecutableError } from "./executableError";
 import { OndaCompilerSource, resolveOndaExecutable } from "./ondaExecutable";
 import { mergeRunDependencies, normalizeRunPath, parseRunSourceGraph, RunSourceGraph } from "./runDependencies";
@@ -258,6 +259,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }));
 
+  context.subscriptions.push(
+    vscode.languages.registerDocumentFormattingEditProvider("onda", {
+      provideDocumentFormattingEdits: (document, _options, token) => ondaFormatEdits(document, token),
+    }),
+    vscode.commands.registerCommand("onda.formatDocument", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor?.document.languageId !== "onda") return;
+      const edits = await ondaFormatEdits(editor.document);
+      if (edits.length) {
+        await editor.edit(builder => {
+          for (const edit of edits) builder.replace(edit.range, edit.newText);
+        });
+      }
+    }),
+  );
   context.subscriptions.push(
     vscode.commands.registerCommand("onda.restartLanguageServer", async () => {
       await restartClient();
@@ -859,6 +875,37 @@ function ondaExecutableConfig(): { command: string; extraArgs: string[]; source:
   };
 }
 
+async function ondaFormatEdits(
+  document: vscode.TextDocument, token?: vscode.CancellationToken,
+): Promise<vscode.TextEdit[]> {
+  if (token?.isCancellationRequested) return [];
+  const version = document.version;
+  const text = document.getText();
+  const { command, extraArgs, source } = ondaExecutableConfig();
+  const controller = new AbortController();
+  const cancellation = token?.onCancellationRequested(() => controller.abort());
+  try {
+    const formatted = await formatSource(command, extraArgs, text, controller.signal);
+    if (token?.isCancellationRequested || document.isClosed || version !== document.version || formatted === text) return [];
+    const lines = formatted.split(/\r?\n/);
+    if (lines.length === document.lineCount) {
+      return lines.flatMap((line, index) => {
+        const original = document.lineAt(index);
+        return original.text === line ? [] : [vscode.TextEdit.replace(original.range, line)];
+      });
+    }
+    const range = new vscode.Range(document.positionAt(0), document.positionAt(text.length));
+    return [vscode.TextEdit.replace(range, formatted)];
+  } catch (error) {
+    if (!token?.isCancellationRequested && !document.isClosed && version === document.version) {
+      void showOndaCommandError("Onda formatting failed", command, error, source);
+    }
+    return [];
+  } finally {
+    cancellation?.dispose();
+  }
+}
+
 const CONFIGURE_EXECUTABLE_ACTION = "Configure Executable";
 
 async function showOndaCommandError(
@@ -1256,7 +1303,7 @@ async function loadStoppedRunMetadata(
     await request("initialize", {
       sample_rate_hz: sampleRateHz,
       block_samples: blockFrames,
-      fast_math: runPanelState.fastMath,
+      math: runPanelState.fastMath ? "fast" : "default",
       param_smoothing_seconds: runPanelState.paramSmoothingMs / 1000,
     });
     return await request("run_metadata", { path: fsPath }) ?? {};

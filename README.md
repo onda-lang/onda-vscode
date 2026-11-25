@@ -1,5 +1,6 @@
 <h1>
-  <img src="assets/png/onda-logo-dark-circle.png" alt="onda logo" width="40" align="absmiddle" /> Onda VS Code extension
+  <a href="assets/png/onda-logo-circle.png#gh-light-mode-only"><img src="assets/png/onda-logo-circle.png" alt="onda logo" width="40" align="absmiddle" /></a>
+  <a href="assets/png/onda-logo-dark-circle.png#gh-dark-mode-only"><img src="assets/png/onda-logo-dark-circle.png" alt="onda logo" width="40" align="absmiddle" /></a> Onda VS Code extension
 </h1>
 
 VS Code extension for the [Onda](https://onda-lang.org) audio programming language. The extension ships with the embedded
@@ -18,6 +19,7 @@ or [Open VSX](https://open-vsx.org/extension/onda-lang/onda-vscode), or use
 
 ## Commands
 
+- **Onda: Format Document** formats the active Onda source, including unsaved edits.
 - **Onda: Run** opens the shared run UI for a source or project selected in the
   editor or Explorer. Saved source/dependency changes reload the running patch.
 - **Onda: Run with Fast Math** enables `--fast-math` for that session, allowing
@@ -40,7 +42,18 @@ or [Open VSX](https://open-vsx.org/extension/onda-lang/onda-vscode), or use
 | `onda.run.sampleRate` | 48,000 Hz for the next run. This can also be changed in the run window. |
 | `onda.run.blockSize` | 512 frames for the next run. This can also be changed in the run window. |
 
-To use a custom compiler:
+To format Onda sources on save, add this language override to VS Code settings:
+
+```json
+{
+  "[onda]": {
+    "editor.defaultFormatter": "onda-lang.onda-vscode",
+    "editor.formatOnSave": true
+  }
+}
+```
+
+To use a custom Onda 0.9.3 or newer compiler:
 
 ```json
 {

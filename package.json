@@ -2,7 +2,7 @@
   "name": "onda-vscode",
   "displayName": "Onda",
   "description": "VS Code extension for the Onda audio programming language",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "onda-lang",
   "icon": "assets/png/onda-logo-dark-rect.png",
   "license": "Apache-2.0",
@@ -19,6 +19,7 @@
   "activationEvents": [
     "onLanguage:onda",
     "onCommand:onda.restartLanguageServer",
+    "onCommand:onda.formatDocument",
     "onCommand:onda.runFile",
     "onCommand:onda.runFileWithFastMath",
     "onCommand:onda.createProject",
@@ -103,6 +104,11 @@
       }
     ],
     "commands": [
+      {
+        "command": "onda.formatDocument",
+        "title": "Onda: Format Document",
+        "enablement": "editorLangId == onda"
+      },
       {
         "command": "onda.runFile",
         "title": "Onda: Run",
@@ -233,7 +239,7 @@
           "default": "bundled",
           "scope": "window",
           "ignoreSync": true,
-          "description": "Compiler used for language services, playback, and project commands throughout this VS Code window. Set in User or Workspace settings; folder overrides are unsupported. Changing this restarts the language server and stops active playback."
+          "description": "Compiler used for language services, formatting, playback, and project commands throughout this VS Code window. Set in User or Workspace settings; folder overrides are unsupported. Changing this restarts the language server and stops active playback."
         }
       }
     }

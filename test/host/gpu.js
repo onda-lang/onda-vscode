@@ -11,6 +11,40 @@ async function until(check, description) {
   throw new Error(`Timed out waiting for ${description}`);
 }
 
+async function checkFormatting(root) {
+  const uri = vscode.Uri.file(path.join(root, 'workspace', 'format.on'));
+  const saved = 'sample:\n  out1 = 0.0\n';
+  await fs.writeFile(uri.fsPath, saved);
+  const document = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(document);
+  const replace = text => editor.edit(edit =>
+    edit.replace(new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), text));
+  const config = vscode.workspace.getConfiguration('editor', document);
+  const setOnSave = value => config.update('formatOnSave', value, vscode.ConfigurationTarget.Workspace, true);
+  try {
+    await setOnSave(false);
+    // The explicit Onda command always uses onda fmt, regardless of formatter preference.
+    await config.update('defaultFormatter', 'vscode.json-language-features', vscode.ConfigurationTarget.Workspace, true);
+    await replace('sample:\n    out1=1.0\n');
+    await vscode.commands.executeCommand('onda.formatDocument');
+    assert.equal(document.getText(), 'sample:\n  out1 = 1.0\n');
+    assert.equal(await fs.readFile(uri.fsPath, 'utf8'), saved);
+    const unformatted = 'sample:\n    out1=2.0\n';
+    await replace(unformatted);
+    assert.ok(await document.save());
+    assert.equal(await fs.readFile(uri.fsPath, 'utf8'), unformatted);
+    await config.update('defaultFormatter', 'onda-lang.onda-vscode', vscode.ConfigurationTarget.Workspace, true);
+    await setOnSave(true);
+    await replace('sample:\n    out1=3.0\n');
+    assert.ok(await document.save());
+    assert.equal(await fs.readFile(uri.fsPath, 'utf8'), 'sample:\n  out1 = 3.0\n');
+  } finally {
+    await setOnSave(undefined);
+    await config.update('defaultFormatter', undefined, vscode.ConfigurationTarget.Workspace, true);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  }
+}
+
 async function checkExternalDependencies(root) {
   const external = path.join(root, 'external', 'dependency.on');
   await fs.mkdir(path.dirname(external), {recursive:true});
@@ -48,6 +82,7 @@ async function checkExternalDependencies(root) {
 async function run() {
   const root = process.env.ONDA_GPU_HOST_TEST_DIR;
   assert.ok(root, 'Run through npm run test:gpu-host');
+  await checkFormatting(root);
   await checkExternalDependencies(root);
   const source = vscode.Uri.file(path.join(root, 'workspace', 'host.onda'));
   assert.equal(vscode.workspace.workspaceFolders.length, 2, 'Exercise multi-root settings');

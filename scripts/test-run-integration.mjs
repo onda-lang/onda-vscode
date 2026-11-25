@@ -167,7 +167,6 @@ try {
       await writeFile(dependency, 'def imported_value(x):\n  return x\n');
       const server = await languageServer(t);
       let middleware;
-      const notifications = [];
       const panel = createRunPanel('0.9.0', panelOptions({'vscode-languageclient/node': {
         TransportKind: {stdio:0},
         LanguageClient: class {
@@ -175,7 +174,6 @@ try {
           async start() {}
           async stop() {}
           async sendNotification(method, params) {
-            if (method === 'workspace/didChangeWatchedFiles') notifications.push(...params.changes);
             server.send({method, params});
           }
         },
@@ -214,10 +212,13 @@ try {
       await until(() => server.diagnostics(uri).length > before, 'unsaved edit diagnostics');
       assert.deepEqual(server.diagnostics(uri).at(-1).params.diagnostics, []);
       await writeFile(dependency, 'def imported_value(x):\n  return missing_overlay_symbol\n');
-      await until(() => notifications.some(change => change.uri === pathToFileURL(dependency).href),
-        'external dependency notification', 3000);
+      // The edit may precede watcher installation. Graph discovery then revalidates
+      // the entry directly. Once the error is visible, exercise a watched repair.
       await until(() => server.diagnostics(uri).at(-1)?.params.diagnostics.some(
         item => item.message.includes('missing_overlay_symbol')), 'external dependency diagnostics', 3000);
+      await writeFile(dependency, 'def imported_value(x):\n  return x\n');
+      await until(() => server.diagnostics(uri).at(-1)?.params.diagnostics.length === 0,
+        'external dependency repair diagnostics', 3000);
     });
   }
 

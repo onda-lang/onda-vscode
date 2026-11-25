@@ -101,6 +101,7 @@ export class RunFileWatcher {
     private readonly onChange: (files: string[]) => void,
     private readonly shouldDefer = () => false,
     private readonly onValidationError: (file: string, error: unknown) => void = () => {},
+    private readonly changeDetection: "content" | "revision" = "content",
   ) {}
 
   update(paths: Iterable<string>): void {
@@ -144,7 +145,9 @@ export class RunFileWatcher {
       watched.validation?.abort();
       const validation = new AbortController();
       watched.validation = validation;
-      watched.contentHash = expected;
+      // A compiled graph supplies a baseline for playback. Independent readers
+      // use the snapshot only to close the registration gap.
+      if (this.changeDetection === "content") watched.contentHash = expected;
       return [{ file, expected, watched, validation }];
     });
     // Stream assets one at a time to bound memory and open file descriptors.
@@ -166,7 +169,7 @@ export class RunFileWatcher {
       if (!current()) continue;
       this.validationRetries.delete(file);
       if (actual !== expected) this.changed(file);
-      else this.pending.delete(file);
+      else if (this.changeDetection === "content") this.pending.delete(file);
     }
   }
 

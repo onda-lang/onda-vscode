@@ -23,7 +23,7 @@ export class LanguageDependencies {
     this.watcher = new RunFileWatcher((files) => {
       changed(files);
       for (const file of files) this.change(file);
-    }, undefined, reportError);
+    }, undefined, reportError, "revision");
   }
 
   async open(file: string): Promise<void> {
@@ -72,8 +72,8 @@ export class LanguageDependencies {
         currentEntry.files = mergeRunDependencies(file, currentEntry.files, graph);
         this.updateWatches();
         if (graph.contentHashes) await this.watcher.validate(graph.contentHashes);
-        // Discovery may observe a repair after the LSP's last analysis, before
-        // its dependency was watched. Revalidate once against the installed graph.
+        // Discovery and the LSP read files independently. Revalidate after
+        // installing watches, then notify the LSP on every disk revision.
         if (current()) this.changed([file]);
       } catch (error) {
         if (current()) this.reportError(file, error);

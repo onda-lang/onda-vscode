@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -58,6 +59,46 @@ test("discovery revalidates the entry after installing watches without rediscove
   await delay(200);
   assert.equal(queries, 1);
   assert.deepEqual(changes, [entry]);
+});
+
+test("a repair matching discovery's snapshot still notifies the independent LSP", async t => {
+  const { entry, dependency } = fixture(t);
+  const saved = fs.readFileSync(dependency);
+  const hash = createHash("sha256").update(saved).digest("hex");
+  // Discovery read the saved contents. The LSP analyzed the broken version.
+  fs.writeFileSync(dependency, "broken\n");
+  const changes = [];
+  const watcher = new LanguageDependencies(async () => ({
+    files: [entry, dependency], complete: true, contentHashes: { [dependency]: hash },
+  }), files => changes.push(...files), assert.fail);
+  t.after(() => watcher.dispose());
+  await watcher.open(entry);
+  fs.writeFileSync(dependency, saved);
+  await until(() => changes.includes(dependency));
+});
+
+test("an import added before watcher installation is discovered and watched", async t => {
+  const { entry, dependency, root } = fixture(t);
+  const nested = path.join(root, "nested.on");
+  fs.writeFileSync(nested, "original nested contents\n");
+  const changes = [];
+  let queries = 0;
+  const watcher = new LanguageDependencies(async () => {
+    const hash = createHash("sha256").update(fs.readFileSync(dependency)).digest("hex");
+    const files = [entry, dependency];
+    if (++queries === 1) {
+      // The first graph saw the original dependency just before this rewrite.
+      fs.writeFileSync(dependency, 'include "../nested.on"\n');
+    } else {
+      files.push(nested);
+    }
+    return { files, complete: true, contentHashes: { [dependency]: hash } };
+  }, files => changes.push(...files), assert.fail);
+  t.after(() => watcher.dispose());
+  await watcher.open(entry);
+  await until(() => queries >= 2 && changes.filter(file => file === entry).length >= 2);
+  fs.writeFileSync(nested, "edited\n");
+  await until(() => changes.includes(nested));
 });
 
 test("incomplete graphs retain dependencies and recover missing paths", async t => {
